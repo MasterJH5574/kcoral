@@ -41,6 +41,7 @@ class Runtime(Protocol):
     def builtin(self, name: str) -> Callable: ...
     def is_cpu_only(self, name: str) -> bool: ...
     def synchronize(self) -> None: ...
+    def take_last_error(self) -> str | None: ...
     def reset(self) -> None: ...
 
 
@@ -50,6 +51,7 @@ def execute(
     lease: Lease,
     *,
     progress: Callable[[int], None] | None = None,
+    cleanup_failed: Callable[[BaseException], None] | None = None,
 ) -> ProgramOutcome:
     """Run a program and serialize only values selected by return instructions.
 
@@ -119,9 +121,48 @@ def execute(
                     "engine", f"{type(exc).__name__}: {exc}", current_index, current
                 )
     finally:
-        _drop_gpu(runtime, lease)
+        # A CUDA fault is often first reported by an instruction-level sync and
+        # then reported again while draining/resetting the runtime. Preserve the
+        # original instruction error, but tell the worker owner that this process
+        # must not serve another request. If cleanup is where an asynchronous
+        # fault first surfaces, attribute it to the active instruction as runtime.
+        try:
+            _drop_gpu(runtime, lease)
+        except Exception as exc:
+            if error is None:
+                error = _instruction_error(
+                    "runtime", f"{type(exc).__name__}: {exc}", current_index, current
+                )
+            if cleanup_failed is not None:
+                cleanup_failed(exc)
+        else:
+            try:
+                last_error = runtime.take_last_error()
+            except Exception as exc:
+                if error is None:
+                    error = _instruction_error(
+                        "runtime", f"{type(exc).__name__}: {exc}", current_index, current
+                    )
+                if cleanup_failed is not None:
+                    cleanup_failed(exc)
+            else:
+                # A launch-configuration error can live in CUDA's thread-local
+                # last-error slot without making synchronize fail. Consume it
+                # here so it belongs to this request rather than the next CUDA
+                # API call. Reading it clears the slot; the context is healthy
+                # and must not be replaced.
+                if last_error is not None:
+                    error = _instruction_error("runtime", last_error, current_index, current)
         env.clear()
-        runtime.reset()
+        try:
+            runtime.reset()
+        except Exception as exc:
+            if error is None:
+                error = _instruction_error(
+                    "runtime", f"{type(exc).__name__}: {exc}", current_index, current
+                )
+            if cleanup_failed is not None:
+                cleanup_failed(exc)
 
     # A failure stops the program but keeps the returns that already ran.
     return ProgramOutcome(
