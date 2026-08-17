@@ -15,6 +15,7 @@ import gc
 import hashlib
 import importlib.metadata
 import linecache
+import os
 import tempfile
 from collections import OrderedDict
 from collections.abc import Callable
@@ -291,6 +292,11 @@ def describe_target() -> dict[str, str]:
     import torch
 
     major, minor = torch.cuda.get_device_capability()
+    # Cache the compiler spelling while worker startup is serialized. A later
+    # cpu_only compile must not query the CUDA driver after dropping its lease.
+    os.environ.setdefault(
+        "TVM_FFI_CUDA_ARCH_LIST", f"{major}.{minor}a" if major >= 9 else f"{major}.{minor}"
+    )
     return {"arch": f"sm_{major}{minor}a" if major >= 9 else f"sm_{major}{minor}"}
 
 
@@ -376,6 +382,20 @@ def _library_dir() -> Path:
     return _LIBRARY_DIR
 
 
-def gpu_runtime_factory() -> GPURuntime:
-    """Picklable factory so a spawned worker can build the runtime."""
-    return GPURuntime()
+class _GPURuntimeFactory:
+    """Two-phase, picklable factory used by spawned GPU workers."""
+
+    def prepare(self) -> Callable[[], GPURuntime]:
+        """Import mandatory dependencies without creating a CUDA context."""
+        _require_torch_and_ffi()
+        import torch
+
+        if torch.cuda.is_initialized():  # guard future changes to preparation
+            raise RuntimeError("GPU runtime preparation unexpectedly initialized CUDA")
+        return GPURuntime
+
+    def __call__(self) -> GPURuntime:
+        return GPURuntime()
+
+
+gpu_runtime_factory = _GPURuntimeFactory()

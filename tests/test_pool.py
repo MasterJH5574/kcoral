@@ -7,7 +7,7 @@ from benchmark_server.lease import GPULeases
 from benchmark_server.pool import PoolBusy, WorkerPool
 from benchmark_server.schemas import Program, Ref, Return, Run
 from benchmark_server.testing import fake_runtime_factory
-from benchmark_server.worker import Worker, WorkerCrashed, WorkerTimeout
+from benchmark_server.worker import Worker, WorkerCrashed, WorkerTimeout, worker_main
 
 
 def prog(*instrs):
@@ -24,7 +24,7 @@ def successful_program():
 
 @pytest.fixture
 def pool():
-    p = WorkerPool([0], fake_runtime_factory)
+    p = WorkerPool([0], fake_runtime_factory, max_requests_per_worker=0)
     yield p
     p.shutdown()
 
@@ -69,6 +69,19 @@ def test_last_error_fails_current_request_without_replacing_worker(pool):
     assert pool.submit(successful_program(), timeout=10).execution.status == "COMPLETED"
 
 
+def test_default_request_limit_replaces_worker_after_preserving_outcome():
+    pool = WorkerPool([0], fake_runtime_factory)
+    try:
+        original_pid = pool._workers[0]._proc.pid
+        outcome = pool.submit(successful_program(), timeout=10)
+
+        assert outcome.execution.status == "COMPLETED"
+        assert outcome.worker_restart_reason == "request_limit"
+        assert pool._workers[0]._proc.pid != original_pid
+    finally:
+        pool.shutdown()
+
+
 class _FailedPipe:
     def __init__(self, exc):
         self._exc = exc
@@ -104,6 +117,109 @@ def test_run_replaces_worker_on_pipe_failures(pipe_error):
     assert exc_info.value.__cause__ is pipe_error
     assert exc_info.value.exitcode == 1
     assert replacements == [leases]
+
+
+def test_worker_prepares_before_parent_grants_gpu_initialization(monkeypatch):
+    events = []
+
+    class Connection:
+        incoming = iter([{"__startup__": "initialize"}, None])
+
+        def send(self, message):
+            events.append(("send", message))
+
+        def recv(self):
+            message = next(self.incoming)
+            events.append(("recv", message))
+            return message
+
+    class Factory:
+        def prepare(self):
+            events.append(("prepare", None))
+
+            def initialize():
+                events.append(("initialize", None))
+                return fake_runtime_factory()
+
+            return initialize
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "before-test")
+    monkeypatch.setattr("benchmark_server.worker.os.setsid", lambda: None)
+    worker_main(0, Connection(), Factory(), max_requests=0)
+
+    assert events[:5] == [
+        ("prepare", None),
+        ("send", {"__startup__": "prepared"}),
+        ("recv", {"__startup__": "initialize"}),
+        ("initialize", None),
+        ("send", {"__ready__": {"target": {"arch": "fake"}, "versions": {}}}),
+    ]
+
+
+def test_replacement_kills_old_process_then_prepares_off_gpu_and_initializes_under_lease():
+    worker = object.__new__(Worker)
+    worker.gpu_id = 0
+    leases = GPULeases([0])
+    leases.acquire(0, worker)
+    events = []
+
+    def kill():
+        assert leases._holder[0] is worker
+        events.append("kill")
+
+    def prepare():
+        assert leases._holder[0] is None
+        events.append("prepare")
+
+    def initialize():
+        assert leases._holder[0] is worker
+        events.append("initialize")
+
+    worker._kill = kill
+    worker._start_process = prepare
+    worker._initialize_process = initialize
+    worker._abandon_and_respawn(leases)
+
+    assert events == ["kill", "prepare", "initialize"]
+    assert leases.depth(0) == 0
+
+
+def test_replacement_releases_gpu_when_respawn_fails():
+    worker = object.__new__(Worker)
+    worker.gpu_id = 0
+    leases = GPULeases([0])
+    leases.acquire(0, worker)
+    worker._kill = lambda: None
+
+    worker._start_process = lambda: None
+
+    def fail_initialize():
+        assert leases._holder[0] is worker
+        raise RuntimeError("initialize failed")
+
+    worker._initialize_process = fail_initialize
+    with pytest.raises(RuntimeError, match="initialize failed"):
+        worker._abandon_and_respawn(leases)
+
+    assert leases.depth(0) == 0
+
+
+def test_replacement_does_not_claim_gpu_when_preparation_fails():
+    worker = object.__new__(Worker)
+    worker.gpu_id = 0
+    leases = GPULeases([0])
+    leases.acquire(0, worker)
+    worker._kill = lambda: None
+
+    def fail_prepare():
+        raise RuntimeError("prepare failed")
+
+    worker._start_process = fail_prepare
+
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        worker._abandon_and_respawn(leases)
+
+    assert leases.depth(0) == 0
 
 
 def test_timeout_kills_and_replaces_worker(pool):
@@ -147,7 +263,7 @@ def test_backpressure_when_all_workers_busy(pool):
 @pytest.fixture
 def shared_gpu_pool():
     """Two workers on one GPU, so they must take turns through its lease."""
-    p = WorkerPool([0], fake_runtime_factory, workers_per_gpu=2)
+    p = WorkerPool([0], fake_runtime_factory, workers_per_gpu=2, max_requests_per_worker=0)
     yield p
     p.shutdown()
 
@@ -255,7 +371,7 @@ class _LeaseRecorder:
 def test_lease_invariants_hold_while_workers_die_under_load():
     """Concurrency and the failure paths together: workers killed mid-program
     cannot leave a GPU held, and no two ever hold one at once."""
-    pool = WorkerPool([0], fake_runtime_factory, workers_per_gpu=4)
+    pool = WorkerPool([0], fake_runtime_factory, workers_per_gpu=4, max_requests_per_worker=0)
     recorder = _LeaseRecorder(pool._leases)
     pool._leases = recorder
     finished, killed, errors = [], [], []
