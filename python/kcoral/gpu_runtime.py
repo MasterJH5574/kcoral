@@ -8,7 +8,6 @@ module touches no GPU.
 
 from __future__ import annotations
 
-import ast
 import ctypes
 import ctypes.util
 import gc
@@ -19,15 +18,13 @@ import os
 import tempfile
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
 
 from . import builtin_ops, process_state
 from .errors import ExecutionError
-
-# The name an uploaded module's entry object takes when the upload names none.
-ENTRY_POINT = "main"
 
 # Libraries already dlopened by this worker, keyed by the SHA-256 of their bytes.
 # Purely a memoization — every request carries the bytes it needs. Bounded because
@@ -37,6 +34,36 @@ _LOADED_LIBRARIES: OrderedDict[str, Any] = OrderedDict()
 _LOADED_LIBRARIES_LIMIT = 32
 _LIBRARY_DIR: Path | None = None
 _LOADERS_READY = False
+
+
+@dataclass(frozen=True)
+class LoadedPythonModule:
+    """The namespace created by executing one uploaded Python source module."""
+
+    namespace: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LoadedLibrary:
+    """A request-local view of one cached TVM-FFI module."""
+
+    module: Any
+
+
+@dataclass(frozen=True)
+class LoadedFunction:
+    """A callable that keeps its defining module alive and propagates Torch's stream."""
+
+    owner: LoadedLibrary
+    function: Callable
+
+    def __call__(self, *args: Any) -> Any:
+        import tvm_ffi
+
+        # Tensor conversion also propagates a stream, but a launcher may accept
+        # only scalar handles and still call TVMFFIEnvGetStream.
+        with tvm_ffi.use_torch_stream():
+            return self.function(*args)
 
 
 class GPURuntime:
@@ -51,16 +78,48 @@ class GPURuntime:
         _warm_up()
         self._builtins = builtin_ops.snapshot_registry()
         self._process_state = process_state.snapshot()
+        self._request_libraries: list[LoadedLibrary] = []
 
-    def load_module(self, source: str, entry: str | None = None, language: str = "python") -> Any:
+    def load_module(self, source: str, language: str = "python") -> Any:
         if language == "cuda":
-            # Nothing runs here: `builtin.compile_cuda` turns the text into a module.
-            assert entry is not None
-            return builtin_ops.CUDASource(source=source, entry=entry)
-        return self._materialize_module(source, entry)
+            # Nothing runs here: get_function selects source for a compile builtin.
+            return builtin_ops.CUDAModule(source=source)
+        return self._materialize_module(source)
 
-    def load_library(self, data: bytes, entry: str) -> Any:
-        return _materialize_library(data, entry)
+    def load_library(self, data: bytes) -> LoadedLibrary:
+        library = _materialize_library(data)
+        # `env` is cleared before reset, but objects returned by the DSO may be
+        # collected through cycles. Keep its code mapped through that collection.
+        self._request_libraries.append(library)
+        return library
+
+    def get_function(self, module: Any, name: str) -> Any:
+        if isinstance(module, LoadedPythonModule):
+            try:
+                return module.namespace[name]
+            except KeyError:
+                raise ExecutionError(
+                    "parse", f"the uploaded Python module defines no name {name!r}"
+                ) from None
+        if isinstance(module, builtin_ops.CUDAModule):
+            return module.get_function(name)
+        if not isinstance(module, LoadedLibrary):
+            raise ExecutionError(
+                "runtime", "get_function expects an uploaded module or library handle"
+            )
+        try:
+            exists = module.module.implements_function(name)
+        except Exception as exc:
+            raise ExecutionError("runtime", f"cannot inspect the uploaded library: {exc}") from exc
+        if not exists:
+            raise ExecutionError("compile", f"the uploaded library exports no function {name!r}")
+        try:
+            function = module.module.get_function(name)
+        except Exception as exc:
+            raise ExecutionError(
+                "compile", f"cannot bind function {name!r} from the uploaded library: {exc}"
+            ) from exc
+        return LoadedFunction(owner=module, function=function)
 
     def target(self) -> dict[str, str]:
         """What a client must compile a library for."""
@@ -127,12 +186,13 @@ class GPURuntime:
         # `__globals__` point back at it), so only a collection frees the
         # module-scope tensors `empty_cache()` would otherwise find still live.
         gc.collect()
+        self._request_libraries.clear()
         # CUDA errors are sticky within a process. Surface one so the parent can
         # replace this worker instead of returning its context to the pool.
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-    def _materialize_module(self, source: str, entry: str | None) -> Any:
+    def _materialize_module(self, source: str) -> LoadedPythonModule:
         # A kernel is re-read from its source text at compile time, so seed
         # linecache. Key by content hash so two functions in one program don't
         # overwrite each other's source.
@@ -148,7 +208,7 @@ class GPURuntime:
             raise ExecutionError("parse", f"syntax error: {exc}") from exc
         except Exception as exc:
             raise ExecutionError("parse", f"{type(exc).__name__}: {exc}") from exc
-        return resolve_entry(ns, source, entry)
+        return LoadedPythonModule(namespace=ns)
 
 
 class _CUDAErrorAPI:
@@ -201,48 +261,6 @@ def _cuda_error_api() -> _CUDAErrorAPI:
         except (AttributeError, OSError) as exc:
             failures.append(f"{candidate}: {exc}")
     raise RuntimeError("could not load libcudart to inspect CUDA errors: " + "; ".join(failures))
-
-
-def resolve_entry(namespace: dict, source: str, entry: str | None) -> Any:
-    """Pick the entry object out of an uploaded module's executed namespace.
-
-    An explicit ``entry`` wins, then ``main``, then the sole top-level definition.
-    Several definitions and no ``main`` is ambiguous, so the error names the
-    candidates instead of guessing. The result is deliberately not checked for
-    callability: a decorator may bind a handle a builtin consumes rather than one
-    ``run`` calls.
-    """
-    if entry is not None:
-        try:
-            return namespace[entry]
-        except KeyError:
-            raise ExecutionError("parse", f"source does not define {entry!r}") from None
-    if ENTRY_POINT in namespace:
-        return namespace[ENTRY_POINT]
-    candidates = [name for name in _top_level_definitions(source) if name in namespace]
-    if len(candidates) == 1:
-        return namespace[candidates[0]]
-    if not candidates:
-        raise ExecutionError("parse", "source defines no top-level function or class")
-    raise ExecutionError(
-        "parse",
-        f"source defines top-level names {', '.join(repr(name) for name in candidates)}; "
-        f"name one {ENTRY_POINT!r} or set 'entry' on the upload",
-    )
-
-
-def _top_level_definitions(source: str) -> list[str]:
-    """Names bound by a top-level ``def``/``async def``/``class``, in source order.
-
-    Imports and assignments are excluded, so a module-level constant beside one
-    kernel does not make the entry ambiguous.
-    """
-    names: list[str] = []
-    for node in ast.parse(source).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name not in names:
-                names.append(node.name)
-    return names
 
 
 def _warm_up() -> None:
@@ -342,9 +360,12 @@ def describe_device_uuid() -> str | None:
         return None
 
 
-def _materialize_library(data: bytes, entry: str) -> Any:
-    """Load a prebuilt shared object and bind the function it exports as ``entry``.
-    Loading needs a path, so the bytes go to a file unlinked once dlopen maps it."""
+def _materialize_library(data: bytes) -> LoadedLibrary:
+    """Load a prebuilt shared object as a module.
+
+    Loading needs a path, so the bytes go to a file unlinked once dlopen maps it.
+    Function binding is separate so one upload can expose multiple entry points.
+    """
     import tvm_ffi
 
     _register_library_loaders()
@@ -364,9 +385,7 @@ def _materialize_library(data: bytes, entry: str) -> Any:
         _LOADED_LIBRARIES[digest] = cached
         if len(_LOADED_LIBRARIES) > _LOADED_LIBRARIES_LIMIT:
             _LOADED_LIBRARIES.popitem(last=False)
-    if not cached.implements_function(entry):
-        raise ExecutionError("compile", f"the uploaded library exports no function {entry!r}")
-    return getattr(cached, entry)
+    return LoadedLibrary(module=cached)
 
 
 def _register_library_loaders() -> None:

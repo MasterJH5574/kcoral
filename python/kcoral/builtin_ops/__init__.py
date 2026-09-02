@@ -22,10 +22,10 @@ from ._registry import (
     restore_registry,
     snapshot_registry,
 )
-from .cuda import CUDASource
+from .cuda import CUDAModule
 
 __all__ = [
-    "CUDASource",
+    "CUDAModule",
     "cpu_only_builtins",
     "register_builtin",
     "resolve",

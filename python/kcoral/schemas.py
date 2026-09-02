@@ -31,7 +31,6 @@ class Upload:
     id: str
     kind: Literal["module", "tensor", "bytes", "library"]
     source: str | None = None
-    entry: str | None = None
     language: Literal["python", "cuda"] = "python"
     blob: str | None = None
     dtype: str | None = None
@@ -55,13 +54,21 @@ class Run:
 
 
 @dataclass
+class GetFunction:
+    id: str
+    module: Ref
+    name: str
+    op: Literal["get_function"] = "get_function"
+
+
+@dataclass
 class Return:
     key: str
     value: Ref
     op: Literal["return"] = "return"
 
 
-Instruction = Upload | Run | Return
+Instruction = Upload | GetFunction | Run | Return
 
 
 @dataclass
@@ -155,7 +162,7 @@ def parse_program(body: Any) -> Program:
         if op == "return":
             instruction = _parse_return(item, index, handles, return_keys)
             return_keys.add(instruction.key)
-        elif op in ("upload", "run"):
+        elif op in ("upload", "get_function", "run"):
             instruction_id = item.get("id")
             if not isinstance(instruction_id, str) or not instruction_id:
                 raise ValidationError(f"instruction {index} needs a non-empty string 'id'")
@@ -163,6 +170,8 @@ def parse_program(body: Any) -> Program:
                 raise ValidationError(f"duplicate instruction id: {instruction_id!r}")
             if op == "upload":
                 instruction = _parse_upload(item, index)
+            elif op == "get_function":
+                instruction = _parse_get_function(item, index, handles)
             else:
                 instruction = _parse_run(item, index, handles)
             handles.add(instruction_id)
@@ -211,7 +220,7 @@ def _parse_upload(item: dict[str, Any], index: int) -> Upload:
     if kind == "module":
         _check_fields(
             item,
-            {"op", "id", "kind", "source", "entry", "language"},
+            {"op", "id", "kind", "source", "language"},
             {"op", "id", "kind", "source"},
             f"instruction {index}",
         )
@@ -223,20 +232,7 @@ def _parse_upload(item: dict[str, Any], index: int) -> Upload:
             raise ValidationError(
                 f"module upload {item['id']!r}: unsupported language {language!r}"
             )
-        entry = item.get("entry")
-        if entry is not None and not (isinstance(entry, str) and entry.isidentifier()):
-            raise ValidationError(f"module upload {item['id']!r}: 'entry' must be an identifier")
-        if language == "cuda":
-            # Nothing executes a CUDA upload, so no entry can be inferred from it.
-            if entry is None:
-                raise ValidationError(
-                    f"module upload {item['id']!r}: a 'cuda' module must name its 'entry'"
-                )
-            if entry == "main":
-                raise ValidationError(
-                    f"module upload {item['id']!r}: C++ reserves 'main'; name the entry otherwise"
-                )
-        return Upload(id=item["id"], kind="module", source=source, entry=entry, language=language)
+        return Upload(id=item["id"], kind="module", source=source, language=language)
     if kind == "tensor":
         _check_fields(
             item,
@@ -277,20 +273,37 @@ def _parse_upload(item: dict[str, Any], index: int) -> Upload:
     if kind == "library":
         _check_fields(
             item,
-            {"op", "id", "kind", "blob", "entry"},
-            {"op", "id", "kind", "blob", "entry"},
+            {"op", "id", "kind", "blob"},
+            {"op", "id", "kind", "blob"},
             f"instruction {index}",
         )
         blob = item["blob"]
-        entry = item["entry"]
         if not is_blob_hash(blob):
             raise ValidationError(
                 f"library upload {item['id']!r}: 'blob' must be a lowercase SHA-256 digest"
             )
-        if not (isinstance(entry, str) and entry.isidentifier()):
-            raise ValidationError(f"library upload {item['id']!r}: 'entry' must be an identifier")
-        return Upload(id=item["id"], kind="library", blob=blob, entry=entry)
+        return Upload(id=item["id"], kind="library", blob=blob)
     raise ValidationError(f"upload {item.get('id')!r}: unknown kind {kind!r}")
+
+
+def _parse_get_function(item: dict[str, Any], index: int, handles: set[str]) -> GetFunction:
+    _check_fields(
+        item,
+        {"op", "id", "module", "name"},
+        {"op", "id", "module", "name"},
+        f"instruction {index}",
+    )
+    module = item["module"]
+    if not is_ref(module):
+        raise ValidationError(f"get_function {item['id']!r}: 'module' must be {{'$ref': id}}")
+    name = item["name"]
+    if not isinstance(name, str) or not name:
+        raise ValidationError(f"get_function {item['id']!r}: 'name' must be a non-empty string")
+    return GetFunction(
+        id=item["id"],
+        module=_resolve_ref(module, handles, item["id"]),
+        name=name,
+    )
 
 
 def _parse_run(item: dict[str, Any], index: int, handles: set[str]) -> Run:

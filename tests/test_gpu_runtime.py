@@ -8,7 +8,7 @@ import pytest
 
 from kcoral.engine import execute
 from kcoral.keys import compute_blob_hash
-from kcoral.schemas import Program, Ref, Return, Run, Upload
+from kcoral.schemas import GetFunction, Program, Ref, Return, Run, Upload
 from kcoral.testing import UNSHARED_GPU
 
 pytestmark = pytest.mark.skipif(
@@ -51,6 +51,26 @@ void add_one(tvm::ffi::TensorView x, tvm::ffi::TensorView y) {
 }
 """
 
+MULTI_ENTRY_CUDA_KERNEL = r"""
+#include <tvm/ffi/extra/c_env_api.h>
+
+__global__ void add_value_kernel(const float* x, float* y, int n, float value) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) y[i] = x[i] + value;
+}
+
+void add_value(tvm::ffi::TensorView x, tvm::ffi::TensorView y, float value) {
+  int n = static_cast<int>(x.numel());
+  cudaStream_t stream = static_cast<cudaStream_t>(
+      TVMFFIEnvGetStream(x.device().device_type, x.device().device_id));
+  add_value_kernel<<<(n + 255) / 256, 256, 0, stream>>>(
+      static_cast<const float*>(x.data_ptr()), static_cast<float*>(y.data_ptr()), n, value);
+}
+
+void add_one(tvm::ffi::TensorView x, tvm::ffi::TensorView y) { add_value(x, y, 1.0f); }
+void add_two(tvm::ffi::TensorView x, tvm::ffi::TensorView y) { add_value(x, y, 2.0f); }
+"""
+
 # One warp round-trips a value per lane through tensor memory. tcgen05 is gated
 # behind the sm_100a target. The tcgen05 ops are warp-synchronous, so no
 # __syncthreads is needed, but the allocation must be freed or the launch reports
@@ -91,6 +111,20 @@ def build_library(source, entry, tmp_path):
     return pathlib.Path(tvm_ffi.cpp.build(name=entry, cuda_files=[str(cu)])).read_bytes()
 
 
+def build_multi_entry_library(source, entries, tmp_path):
+    """Build one TVM-FFI library that exports every name in ``entries``."""
+    import tvm_ffi.cpp
+    from tvm_ffi.cpp import extension
+
+    from kcoral.builtin_ops.cuda import _cuda_arch_list
+
+    os.environ.setdefault("TVM_FFI_CUDA_ARCH_LIST", _cuda_arch_list())
+    name = "multi_entry_" + "_".join(entries)
+    cu = tmp_path / f"{name}.cu"
+    cu.write_text(extension._decorate_with_tvm_ffi(source, dict.fromkeys(entries, "")))
+    return pathlib.Path(tvm_ffi.cpp.build(name=name, cuda_files=[str(cu)])).read_bytes()
+
+
 def build_tirx_library(tmp_path):
     """Compile TIRx the way a client would, with an explicit target so no GPU is
     consulted. The exported name comes from the function, not the IRModule key."""
@@ -98,7 +132,9 @@ def build_tirx_library(tmp_path):
 
     from kcoral.gpu_runtime import GPURuntime, describe_target
 
-    prim_func = GPURuntime().load_module(PRIM_KERNEL.replace("def main(", "def add_one("))
+    runtime = GPURuntime()
+    module = runtime.load_module(PRIM_KERNEL.replace("def main(", "def add_one("))
+    prim_func = runtime.get_function(module, "add_one")
     target = tvm.target.Target({"kind": "cuda", "arch": describe_target()["arch"]})
     with target:  # the tirx pipeline reads the arch from Target.current()
         executable = tvm.compile(
@@ -194,11 +230,25 @@ def decode_structural(encoded):
     return encoded["value"]
 
 
+def test_python_module_get_function_selects_named_objects():
+    rt = runtime()
+    module = rt.load_module(
+        "def add_one(value):\n    return value + 1\n\ndef times_two(value):\n    return value * 2\n"
+    )
+
+    add_one = rt.get_function(module, "add_one")
+    times_two = rt.get_function(module, "times_two")
+
+    assert times_two(add_one(20)) == 42
+
+
 def test_compile_correctness_and_benchmark():
     program = Program(
         [
-            Upload("kernel", "module", source=KERNEL),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "module", source=KERNEL),
+            GetFunction("kernel", ref("kernel_module"), "main"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"N": 256}]),
@@ -215,7 +265,7 @@ def test_compile_correctness_and_benchmark():
         ]
     )
     outcome = execute(program, runtime(), UNSHARED_GPU)
-    assert outcome.status == "COMPLETED"
+    assert outcome.status == "COMPLETED", outcome.error
     check = decode_structural(outcome.results["check"])
     timing = decode_structural(outcome.results["timing"])
     assert check["passed"] and check["max_abs_err"] == 0
@@ -225,8 +275,10 @@ def test_compile_correctness_and_benchmark():
 def test_cuda_c_compile_correctness_and_benchmark():
     program = Program(
         [
-            Upload("kernel", "module", source=CUDA_KERNEL, entry="add_one", language="cuda"),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "module", source=CUDA_KERNEL, language="cuda"),
+            GetFunction("kernel", ref("kernel_module"), "add_one"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("compiled", "builtin.compile_cuda", [ref("kernel")]),
@@ -255,7 +307,8 @@ def test_cuda_c_nvcc_error_is_compile_failure_and_names_the_mistake():
     outcome = execute(
         Program(
             [
-                Upload("kernel", "module", source=bad, entry="add_one", language="cuda"),
+                Upload("kernel_module", "module", source=bad, language="cuda"),
+                GetFunction("kernel", ref("kernel_module"), "add_one"),
                 Run("compiled", "builtin.compile_cuda", [ref("kernel")]),
             ]
         ),
@@ -277,9 +330,8 @@ def test_cuda_c_runs_on_the_arch_specific_target():
     outcome = execute(
         Program(
             [
-                Upload(
-                    "kernel", "module", source=TMEM_KERNEL, entry="tmem_roundtrip", language="cuda"
-                ),
+                Upload("kernel_module", "module", source=TMEM_KERNEL, language="cuda"),
+                GetFunction("kernel", ref("kernel_module"), "tmem_roundtrip"),
                 Run("out", "builtin.zeros", [{"shape": [32], "dtype": "int32"}]),
                 Run("compiled", "builtin.compile_cuda", [ref("kernel")]),
                 Run("invoke", ref("compiled"), [ref("out")]),
@@ -301,8 +353,10 @@ def test_prebuilt_library_runs_and_benchmarks(tmp_path):
     digest = compute_blob_hash(data)
     program = Program(
         [
-            Upload("kernel", "library", blob=digest, entry="add_one"),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "library", blob=digest),
+            GetFunction("kernel", ref("kernel_module"), "add_one"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("invoke", ref("kernel"), [ref("input"), ref("output")]),
@@ -324,6 +378,55 @@ def test_prebuilt_library_runs_and_benchmarks(tmp_path):
     assert decode_structural(outcome.results["timing"])["latency_ms_median"] > 0
 
 
+def test_prebuilt_library_module_binds_and_runs_multiple_functions(tmp_path):
+    data = build_multi_entry_library(
+        MULTI_ENTRY_CUDA_KERNEL,
+        ["add_one", "add_two"],
+        tmp_path,
+    )
+    digest = compute_blob_hash(data)
+    reference = "def one(a):\n    return a + 1.0\n\ndef two(a):\n    return a + 2.0\n"
+    program = Program(
+        [
+            Upload("kernels", "library", blob=digest),
+            GetFunction("add_one", ref("kernels"), "add_one"),
+            GetFunction("add_two", ref("kernels"), "add_two"),
+            Upload("reference", "module", source=reference),
+            GetFunction("one", ref("reference"), "one"),
+            GetFunction("two", ref("reference"), "two"),
+            Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
+            Run("output_one", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
+            Run("output_two", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
+            Run("invoke_one", ref("add_one"), [ref("input"), ref("output_one")]),
+            Run("invoke_two", ref("add_two"), [ref("input"), ref("output_two")]),
+            Run("expected_one", ref("one"), [ref("input")]),
+            Run("expected_two", ref("two"), [ref("input")]),
+            Run("check_one", "builtin.check_close", [ref("output_one"), ref("expected_one")]),
+            Run("check_two", "builtin.check_close", [ref("output_two"), ref("expected_two")]),
+            Run(
+                "timing",
+                "builtin.benchmark",
+                [
+                    ref("add_two"),
+                    ref("input"),
+                    ref("output_two"),
+                    {"warmup": 5, "repeat": 20},
+                ],
+            ),
+            Return("check_one", ref("check_one")),
+            Return("check_two", ref("check_two")),
+            Return("timing", ref("timing")),
+        ],
+        blob_bytes={digest: data},
+    )
+
+    outcome = execute(program, runtime(), UNSHARED_GPU)
+    assert outcome.status == "COMPLETED", outcome.error
+    assert decode_structural(outcome.results["check_one"])["max_abs_err"] == 0
+    assert decode_structural(outcome.results["check_two"])["max_abs_err"] == 0
+    assert decode_structural(outcome.results["timing"])["latency_ms_median"] > 0
+
+
 def test_prebuilt_tirx_library_runs(tmp_path):
     """An export_library artifact carries its device code as an embedded blob, so
     this is the path that needs the TVM CUDA runtime loader registered."""
@@ -331,8 +434,10 @@ def test_prebuilt_tirx_library_runs(tmp_path):
     digest = compute_blob_hash(data)
     program = Program(
         [
-            Upload("kernel", "library", blob=digest, entry="add_one"),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "library", blob=digest),
+            GetFunction("kernel", ref("kernel_module"), "add_one"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("invoke", ref("kernel"), [ref("input"), ref("output")]),
@@ -356,8 +461,10 @@ def test_prebuilt_cutedsl_library_runs(tmp_path):
     digest = compute_blob_hash(data)
     program = Program(
         [
-            Upload("kernel", "library", blob=digest, entry="add_one"),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "library", blob=digest),
+            GetFunction("kernel", ref("kernel_module"), "add_one"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("invoke", ref("kernel"), [ref("input"), ref("output")]),
@@ -379,8 +486,10 @@ def test_cutedsl_source_compiles_on_the_server():
         pytest.skip("CuTeDSL compilation requires cutlass")
     program = Program(
         [
-            Upload("kernel", "module", source=CUTEDSL_KERNEL, entry="add_one"),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "module", source=CUTEDSL_KERNEL),
+            GetFunction("kernel", ref("kernel_module"), "add_one"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             # Compiling specializes on these tensors; the result takes torch ones.
@@ -407,7 +516,8 @@ def test_compile_cutedsl_reports_an_undecorated_kernel():
     outcome = execute(
         Program(
             [
-                Upload("kernel", "module", source="def main(src, dst):\n    pass\n"),
+                Upload("kernel_module", "module", source="def main(src, dst):\n    pass\n"),
+                GetFunction("kernel", ref("kernel_module"), "main"),
                 Run("input", "builtin.randn", [{"shape": [8], "dtype": "float32"}]),
                 Run("compiled", "builtin.compile_cutedsl", [ref("kernel"), ref("input")]),
             ]
@@ -429,8 +539,10 @@ def test_triton_source_compiles_on_the_server():
     n = 4096
     program = Program(
         [
-            Upload("kernel", "module", source=TRITON_KERNEL, entry="add_one"),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "module", source=TRITON_KERNEL),
+            GetFunction("kernel", ref("kernel_module"), "add_one"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [n], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [n], "dtype": "float32"}]),
             Run(
@@ -456,12 +568,15 @@ def test_triton_source_compiles_on_the_server():
     assert decode_structural(outcome.results["timing"])["latency_ms_median"] > 0
 
 
-def test_library_with_a_wrong_entry_fails_to_compile(tmp_path):
+def test_library_with_a_missing_function_fails_to_compile(tmp_path):
     data = build_library(CUDA_KERNEL, "add_one", tmp_path)
     digest = compute_blob_hash(data)
     outcome = execute(
         Program(
-            [Upload("kernel", "library", blob=digest, entry="not_there")],
+            [
+                Upload("kernel_module", "library", blob=digest),
+                GetFunction("kernel", ref("kernel_module"), "not_there"),
+            ],
             blob_bytes={digest: data},
         ),
         runtime(),
@@ -482,7 +597,8 @@ def test_library_cache_is_only_a_memoization(tmp_path):
     def run_once():
         program = Program(
             [
-                Upload("kernel", "library", blob=digest, entry="add_one"),
+                Upload("kernel_module", "library", blob=digest),
+                GetFunction("kernel", ref("kernel_module"), "add_one"),
                 Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
                 Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
                 Run("invoke", ref("kernel"), [ref("input"), ref("output")]),
@@ -507,7 +623,8 @@ def test_compile_tirx_reuses_an_already_compiled_kernel():
 
     tirx._COMPILED.clear()
     rt = runtime()
-    kernel = rt.load_module(KERNEL)
+    module = rt.load_module(KERNEL)
+    kernel = rt.get_function(module, "main")
     first = tirx.compile_tirx(kernel, {"N": 256})
     second = tirx.compile_tirx(kernel, {"N": 256})
     assert first is second  # same Executable, so codegen ran once
@@ -517,7 +634,8 @@ def test_compile_tirx_reuses_an_already_compiled_kernel():
 def test_benchmark_budget_counts_and_no_flush():
     program = Program(
         [
-            Upload("kernel", "module", source=KERNEL),
+            Upload("kernel_module", "module", source=KERNEL),
+            GetFunction("kernel", ref("kernel_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"N": 256}]),
@@ -629,7 +747,8 @@ def test_tirx_error_is_parse_failure():
     outcome = execute(
         Program(
             [
-                Upload("kernel", "module", source=bad_kernel),
+                Upload("kernel_module", "module", source=bad_kernel),
+                GetFunction("kernel", ref("kernel_module"), "main"),
                 Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"N": 16}]),
             ]
         ),
@@ -637,7 +756,7 @@ def test_tirx_error_is_parse_failure():
         UNSHARED_GPU,
     )
     assert outcome.status == "FAILED" and outcome.error["kind"] == "parse"
-    assert outcome.error["instruction_index"] == 1
+    assert outcome.error["instruction_index"] == 2
 
 
 def test_compile_on_non_kernel_is_compile_failure():
@@ -659,7 +778,8 @@ def test_prim_func_kernel_compiles_directly():
     outcome = execute(
         Program(
             [
-                Upload("kernel", "module", source=PRIM_KERNEL),
+                Upload("kernel_module", "module", source=PRIM_KERNEL),
+                GetFunction("kernel", ref("kernel_module"), "main"),
                 Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32"}]),
                 Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
                 Run("compiled", "builtin.compile_tirx", [ref("kernel")]),
@@ -676,7 +796,8 @@ def test_prim_func_with_bindings_is_compile_failure():
     outcome = execute(
         Program(
             [
-                Upload("kernel", "module", source=PRIM_KERNEL),
+                Upload("kernel_module", "module", source=PRIM_KERNEL),
+                GetFunction("kernel", ref("kernel_module"), "main"),
                 Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"N": 256}]),
             ]
         ),
@@ -684,14 +805,15 @@ def test_prim_func_with_bindings_is_compile_failure():
         UNSHARED_GPU,
     )
     assert outcome.status == "FAILED" and outcome.error["kind"] == "compile"
-    assert outcome.error["instruction_index"] == 1
+    assert outcome.error["instruction_index"] == 2
 
 
 def test_bad_binding_name_is_compile_failure():
     outcome = execute(
         Program(
             [
-                Upload("kernel", "module", source=KERNEL),
+                Upload("kernel_module", "module", source=KERNEL),
+                GetFunction("kernel", ref("kernel_module"), "main"),
                 Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"WRONG": 1}]),
             ]
         ),
@@ -699,15 +821,17 @@ def test_bad_binding_name_is_compile_failure():
         UNSHARED_GPU,
     )
     assert outcome.status == "FAILED" and outcome.error["kind"] == "compile"
-    assert outcome.error["instruction_index"] == 1
+    assert outcome.error["instruction_index"] == 2
 
 
 def test_assert_close_failure_stops_without_results():
     wrong = KERNEL.replace("A[i] + 1.0", "A[i] + 2.0")
     program = Program(
         [
-            Upload("kernel", "module", source=wrong),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "module", source=wrong),
+            GetFunction("kernel", ref("kernel_module"), "main"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32"}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"N": 256}]),
@@ -719,7 +843,7 @@ def test_assert_close_failure_stops_without_results():
     )
     outcome = execute(program, runtime(), UNSHARED_GPU)
     assert outcome.status == "FAILED" and outcome.results == {}
-    assert outcome.error["kind"] == "correctness" and outcome.error["instruction_index"] == 7
+    assert outcome.error["kind"] == "correctness" and outcome.error["instruction_index"] == 9
     assert outcome.error["instruction_op"] == "run" and outcome.error["instruction_id"] == "check"
 
 
@@ -728,8 +852,10 @@ def test_timing_returned_before_a_correctness_failure_is_kept():
     wrong = KERNEL.replace("A[i] + 1.0", "A[i] + 2.0")
     program = Program(
         [
-            Upload("kernel", "module", source=wrong),
-            Upload("reference", "module", source=REF),
+            Upload("kernel_module", "module", source=wrong),
+            GetFunction("kernel", ref("kernel_module"), "main"),
+            Upload("reference_module", "module", source=REF),
+            GetFunction("reference", ref("reference_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32"}]),
             Run("output", "builtin.empty", [{"shape": [256], "dtype": "float32"}]),
             Run("compiled", "builtin.compile_tirx", [ref("kernel"), {"N": 256}]),
@@ -785,7 +911,8 @@ def test_uploaded_code_calls_builtins_directly():
     instructions name."""
     program = Program(
         [
-            Upload("caller", "module", source=BUILTIN_CALLER),
+            Upload("caller_module", "module", source=BUILTIN_CALLER),
+            GetFunction("caller", ref("caller_module"), "main"),
             Run("input", "builtin.randn", [{"shape": [256], "dtype": "float32", "seed": 0}]),
             Run("check", ref("caller"), [ref("input")]),
             Return("check", ref("check")),
@@ -839,7 +966,8 @@ def test_module_scope_allocations_do_not_survive_the_request():
     for _ in range(3):
         program = Program(
             [
-                Upload("kernel", "module", source=MODULE_SCOPE_ALLOCATION),
+                Upload("kernel_module", "module", source=MODULE_SCOPE_ALLOCATION),
+                GetFunction("kernel", ref("kernel_module"), "main"),
                 Run("total", ref("kernel"), []),
                 Return("total", ref("total")),
             ]
@@ -900,7 +1028,8 @@ def test_popped_candidate_modules_do_not_survive_the_request():
     for tag in range(4):
         program = Program(
             [
-                Upload("harness", "module", source=CANDIDATE_HARNESS),
+                Upload("harness_module", "module", source=CANDIDATE_HARNESS),
+                GetFunction("harness", ref("harness_module"), "main"),
                 Run("evaluated", ref("harness"), [tag]),
                 Return("evaluated", ref("evaluated")),
             ]

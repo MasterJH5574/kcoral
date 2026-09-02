@@ -65,7 +65,6 @@ class Program:
         id: str,
         kind: str,
         source: str | None = None,
-        entry: str | None = None,
         language: str = "python",
         value: Any = None,
         dtype: str | None = None,
@@ -81,20 +80,9 @@ class Program:
             instruction = {"op": "upload", "id": id, "kind": "module", "source": source}
             if language != "python":
                 instruction["language"] = language
-            if entry is not None:
-                if not (isinstance(entry, str) and entry.isidentifier()):
-                    raise ValueError("module upload 'entry' must be an identifier")
-                instruction["entry"] = entry
-            if language == "cuda":
-                if entry is None:
-                    raise ValueError("a 'cuda' module upload must name its 'entry'")
-                if entry == "main":
-                    raise ValueError("C++ reserves 'main'; name the entry otherwise")
         elif kind == "tensor":
             if source is not None:
                 raise TypeError("tensor upload does not accept 'source'")
-            if entry is not None:
-                raise TypeError("tensor upload does not accept 'entry'")
             if language != "python":
                 raise TypeError("tensor upload does not accept 'language'")
             tensor_dtype, tensor_shape, raw = _tensor_fields(value, dtype=dtype, shape=shape)
@@ -109,8 +97,8 @@ class Program:
                 "shape": tensor_shape,
             }
         elif kind == "bytes":
-            if source is not None or entry is not None:
-                raise TypeError("bytes upload does not accept module fields")
+            if source is not None:
+                raise TypeError("bytes upload does not accept 'source'")
             if dtype is not None or shape is not None:
                 raise TypeError("bytes upload does not accept tensor fields")
             if language != "python":
@@ -132,8 +120,6 @@ class Program:
                 raise TypeError("library upload does not accept 'source'")
             if dtype is not None or shape is not None:
                 raise TypeError("library upload does not accept tensor fields")
-            if not (isinstance(entry, str) and entry.isidentifier()):
-                raise ValueError("library upload requires an identifier 'entry'")
             raw = value if isinstance(value, bytes) else bytes(memoryview(value))
             blob_hash = compute_blob_hash(raw)
             self._blobs.setdefault(blob_hash, raw)
@@ -142,12 +128,35 @@ class Program:
                 "id": id,
                 "kind": "library",
                 "blob": blob_hash,
-                "entry": entry,
             }
         else:
             raise ValueError("upload kind must be 'module', 'tensor', 'bytes', or 'library'")
         self._add_id(id)
         self._instructions.append(instruction)
+        return Register(id)
+
+    def get_function(
+        self,
+        *,
+        id: str,
+        module: Register | dict[str, str],
+        name: str,
+    ) -> Register:
+        reference = _reference(module) if isinstance(module, Register) else module
+        if not (
+            isinstance(reference, dict)
+            and set(reference) == {"$ref"}
+            and isinstance(reference["$ref"], str)
+        ):
+            raise TypeError("module must be a Register or {'$ref': id}")
+        if reference["$ref"] not in self._ids:
+            raise ValueError(f"get_function {id!r} references unknown handle {reference['$ref']!r}")
+        if not isinstance(name, str) or not name:
+            raise ValueError("function name must be a non-empty string")
+        self._add_id(id)
+        self._instructions.append(
+            {"op": "get_function", "id": id, "module": reference, "name": name}
+        )
         return Register(id)
 
     def run(
@@ -540,7 +549,7 @@ def _parse_error(error: Any) -> dict[str, Any]:
         error["instruction_index"], int
     ):
         raise ValueError("error instruction_index must be an integer")
-    if error["instruction_op"] not in ("upload", "run", "return"):
+    if error["instruction_op"] not in ("upload", "get_function", "run", "return"):
         raise ValueError("error instruction_op is invalid")
     if error["instruction_id"] is not None and not isinstance(error["instruction_id"], str):
         raise ValueError("error instruction_id must be a string or null")
