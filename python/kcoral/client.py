@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import stat
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,7 +18,14 @@ import numpy as np
 
 from .keys import compute_blob_hash, is_blob_hash, verify_blob
 from .multipart import parse_multipart
-from .schemas import DTYPE_ITEM_SIZES, expected_tensor_nbytes, strict_json_loads
+from .schemas import (
+    DTYPE_ITEM_SIZES,
+    expected_tensor_nbytes,
+    normalize_file_path,
+    strict_json_loads,
+    validate_and_add_file_path,
+    validate_and_add_file_paths,
+)
 
 
 class KCoralError(Exception):
@@ -54,10 +65,50 @@ class Program:
     _blobs: dict[str, bytes] = field(default_factory=dict, init=False)
     _ids: set[str] = field(default_factory=set, init=False)
     _return_keys: set[str] = field(default_factory=set, init=False)
+    _file_paths: set[str] = field(default_factory=set, init=False)
 
     @property
     def instructions(self) -> list[dict[str, Any]]:
         return list(self._instructions)
+
+    def upload_file(self, *, blob: Any, path: str) -> None:
+        """Snapshot bytes-like data as a file in the request workspace.
+
+        The destination must be a relative POSIX path without ``..`` components
+        and cannot conflict with another file upload. Returns no register.
+        """
+        normalized_path = normalize_file_path(path)
+        try:
+            raw = blob if isinstance(blob, bytes) else bytes(memoryview(blob))
+        except TypeError as exc:
+            raise TypeError("file upload requires a bytes-like 'blob'") from exc
+        validate_and_add_file_path(normalized_path, self._file_paths)
+        blob_hash = compute_blob_hash(raw)
+        self._blobs.setdefault(blob_hash, raw)
+        self._instructions.append(
+            {"op": "upload", "kind": "file", "blob": blob_hash, "path": normalized_path}
+        )
+
+    def upload_folder(self, folder: str | os.PathLike[str], *, path: str) -> None:
+        """Snapshot a directory as ordinary file uploads at this program position.
+
+        Includes hidden files; empty directories and original file metadata are
+        not uploaded. Symbolic links, special files, and repeated directories
+        are rejected. Failed calls leave the program unchanged.
+        """
+        destination = normalize_file_path(path)
+        instructions = []
+        blobs = {}
+        for remote, data in _folder_files(folder, destination):
+            digest = compute_blob_hash(data)
+            blobs.setdefault(digest, data)
+            instructions.append({"op": "upload", "kind": "file", "blob": digest, "path": remote})
+        # One batch validation avoids a quadratic scan for folders with many
+        # files and commits no state until traversal and validation both succeed.
+        validate_and_add_file_paths([item["path"] for item in instructions], self._file_paths)
+        self._instructions.extend(sorted(instructions, key=lambda item: item["path"]))
+        for digest, data in blobs.items():
+            self._blobs.setdefault(digest, data)
 
     def upload(
         self,
@@ -192,7 +243,7 @@ class Program:
         self._return_keys.add(key)
         self._instructions.append({"op": "return", "key": key, "value": reference})
 
-    def _add_id(self, instruction_id: str) -> None:
+    def _add_id(self, instruction_id: str | None) -> None:
         if not isinstance(instruction_id, str) or not instruction_id:
             raise ValueError("instruction id must be a non-empty string")
         if instruction_id in self._ids:
@@ -330,6 +381,72 @@ class Client:
             return self._http.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
             raise TransportError(str(exc)) from exc
+
+
+def _folder_files(folder: str | os.PathLike[str], destination: str) -> Iterator[tuple[str, bytes]]:
+    """Yield snapshots of regular files, never following links or recursing in Python.
+
+    Directory descriptors anchor each descent even if a local path is replaced
+    during traversal. Only the active ancestry stays open, so a wide tree does
+    not exhaust descriptors. File reads are bounded by their initial size.
+    """
+    source = Path(folder)
+    if source.is_symlink():
+        raise ValueError(f"upload_folder rejects symbolic links: {source}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    seen = set()
+    stack = []
+
+    def enter(fd: int, remote: str) -> None:
+        try:
+            info = os.fstat(fd)
+            identity = (info.st_dev, info.st_ino)
+            if identity in seen:
+                raise ValueError(f"upload_folder encountered a repeated directory: {remote}")
+            seen.add(identity)
+            stack.append((fd, os.scandir(fd), remote))
+        except BaseException:
+            os.close(fd)
+            raise
+
+    enter(os.open(source, flags), destination)
+    try:
+        while stack:
+            parent_fd, entries, remote = stack[-1]
+            entry = next(entries, None)
+            if entry is None:
+                entries.close()
+                os.close(parent_fd)
+                stack.pop()
+                continue
+            path = normalize_file_path(f"{remote}/{entry.name}")
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                enter(os.open(entry.name, flags, dir_fd=parent_fd), path)
+            elif stat.S_ISREG(mode):
+                fd = os.open(
+                    entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd
+                )
+                with os.fdopen(fd, "rb") as stream:
+                    before = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(before.st_mode):
+                        raise ValueError(f"upload_folder requires a regular file: {path}")
+                    data = stream.read(before.st_size)
+                    after = os.fstat(stream.fileno())
+                    if (
+                        len(data) != before.st_size
+                        or after.st_size != before.st_size
+                        or after.st_mtime_ns != before.st_mtime_ns
+                        or after.st_ctime_ns != before.st_ctime_ns
+                    ):
+                        raise ValueError(f"upload_folder file changed while reading: {path}")
+                yield path, data
+            else:
+                raise ValueError(f"upload_folder rejects symbolic links and special files: {path}")
+    finally:
+        for fd, entries, _ in reversed(stack):
+            entries.close()
+            os.close(fd)
 
 
 def _reference(register: Register) -> dict[str, str]:

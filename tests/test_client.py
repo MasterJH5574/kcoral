@@ -1,5 +1,6 @@
 """Client tests against a real uvicorn server over TCP."""
 
+import json
 import os
 import threading
 import time
@@ -23,7 +24,7 @@ from kcoral.client import (
 )
 from kcoral.config import ServerConfig
 from kcoral.keys import compute_blob_hash
-from kcoral.multipart import MultipartPart, encode_multipart
+from kcoral.multipart import MultipartPart, encode_multipart, parse_multipart
 from kcoral.schemas import DTYPE_ITEM_SIZES, expected_tensor_nbytes
 from kcoral.testing import fake_runtime_factory
 
@@ -43,9 +44,13 @@ def _start_server(app):
 
 
 @pytest.fixture(scope="module")
-def server_url():
+def server_url(tmp_path_factory):
     app = create_app(
-        ServerConfig(gpus=[0], max_requests_per_worker=0),
+        ServerConfig(
+            gpus=[0],
+            max_requests_per_worker=0,
+            disk_cache_dir=tmp_path_factory.mktemp("file-cache"),
+        ),
         runtime_factory=fake_runtime_factory,
     )
     server, thread, url = _start_server(app)
@@ -110,6 +115,139 @@ def test_bytes_cache_retry_and_result(server_url):
     expected = {"file": {"size": len(value), "format": "safetensors"}}
     assert first.results == expected
     assert second.results == expected
+
+
+def test_file_cache_retry_is_read_from_a_request_local_workspace(server_url):
+    value = b"safetensors contents\x00\xff"
+    program = Program()
+    assert program.upload_file(blob=value, path="./assets//tensor") is None
+    inspect_module = program.upload(
+        id="inspect_module",
+        kind="module",
+        source=(
+            "import os\n"
+            "def main():\n"
+            "    data = open('assets/tensor', 'rb').read()\n"
+            "    return {'data': data, 'cwd': os.getcwd()}\n"
+        ),
+    )
+    inspect_file = program.get_function(id="inspect_file", module=inspect_module, name="main")
+    result = program.run(id="result", fn=inspect_file)
+    program.return_(key="file", value=result)
+
+    with Client(server_url) as client:
+        first = client.execute(program)
+        second = client.execute(program)
+
+    for outcome in (first, second):
+        assert outcome.results["file"]["data"] == value
+        assert not os.path.exists(outcome.results["file"]["cwd"])
+    assert first.results["file"]["cwd"] != second.results["file"]["cwd"]
+
+
+@pytest.mark.parametrize(
+    "cached,evict_after_miss,expected_attempts",
+    [
+        pytest.param((), False, [((), "CACHE_MISS"), (("a", "b"), "COMPLETED")], id="cold"),
+        pytest.param(("a", "b"), False, [((), "COMPLETED")], id="warm"),
+        pytest.param(("a",), False, [((), "CACHE_MISS"), (("b",), "COMPLETED")], id="partial"),
+        pytest.param(
+            ("a",),
+            True,
+            [((), "CACHE_MISS"), (("b",), "CACHE_MISS"), (("a", "b"), "COMPLETED")],
+            id="evicted",
+        ),
+    ],
+)
+def test_folder_upload_reuses_identical_wire_program_for_every_attempt(
+    tmp_path, cached, evict_after_miss, expected_attempts
+):
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    a, b = b"first", b"second"
+    (source / "a").write_bytes(a)
+    (source / "nested" / "b").write_bytes(b)
+    (source / "duplicate").write_bytes(a)
+    counter = tmp_path / "executions"
+    program = Program()
+    program.upload_folder(source, path="data")
+    # Changing a local file after construction must not change any retry.
+    (source / "a").write_bytes(b"changed")
+    module = program.upload(
+        id="reader_module",
+        kind="module",
+        source=(
+            "from pathlib import Path\n"
+            f"with open({str(counter)!r}, 'a') as counter:\n    counter.write('x')\n"
+            "def main():\n"
+            "    names = ('data/a', 'data/nested/b', 'data/duplicate')\n"
+            "    return [Path(name).read_bytes() for name in names]\n"
+        ),
+    )
+    fn = program.get_function(id="reader", module=module, name="main")
+    value = program.run(id="value", fn=fn)
+    program.return_(key="value", value=value)
+    app = create_app(
+        ServerConfig(
+            gpus=[0],
+            workers_per_gpu=1,
+            max_requests_per_worker=0,
+            disk_cache_dir=tmp_path / "cache",
+        ),
+        runtime_factory=fake_runtime_factory,
+    )
+    server, thread, url = _start_server(app)
+    blobs = {"a": a, "b": b}
+    keys = {name: compute_blob_hash(data) for name, data in blobs.items()}
+    requests = []
+    statuses = []
+
+    def record_request(request):
+        parts = parse_multipart(request.headers["content-type"], request.read())
+        requests.append(
+            (
+                next(part.data for part in parts if part.name == "program"),
+                {
+                    part.name.removeprefix("blob:")
+                    for part in parts
+                    if part.name.startswith("blob:")
+                },
+            )
+        )
+
+    def record_response(response):
+        response.read()
+        # Completed responses contain binary results; misses are plain JSON.
+        if response.headers["content-type"].startswith("application/json"):
+            statuses.append(response.json()["status"])
+        else:
+            statuses.append("COMPLETED")
+        if evict_after_miss and len(statuses) == 1:
+            assert statuses == ["CACHE_MISS"]
+            assert response.json()["missing_blobs"] == [keys["b"]]
+            # The server asked only for b. Evict cached a before that retry so
+            # sending b alone misses again and forces the client's full resend.
+            key = keys["a"]
+            (app.state.file_cache.directory / key[:2] / key).unlink()
+            assert app.state.file_cache.get(key) is None
+
+    try:
+        for name in cached:
+            app.state.file_cache.put(keys[name], blobs[name])
+        with Client(url) as client:
+            client._http.event_hooks = {"request": [record_request], "response": [record_response]}
+            result = client.execute(program)
+        assert result.completed and result.results == {"value": [a, b, a]}
+        assert counter.read_text() == "x"
+        assert [(parts, status) for (_, parts), status in zip(requests, statuses, strict=True)] == [
+            ({keys[name] for name in names}, status) for names, status in expected_attempts
+        ]
+        assert all(payload == requests[0][0] for payload, _ in requests)
+        assert json.loads(requests[0][0])["instructions"] == program.instructions
+        assert all(app.state.cache.get(key) is None for key in keys.values())
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
 
 
 def test_cache_churn_falls_back_to_all_blobs():
@@ -377,6 +515,32 @@ def test_bytes_builder_hashes_bytes_without_tensor_metadata():
     }
     with pytest.raises(TypeError, match="bytes-like"):
         Program().upload(id="file", kind="bytes", value="text")
+
+
+def test_file_builder_snapshots_blob_without_creating_a_register():
+    value = bytearray(b"file contents")
+    program = Program()
+    assert program.upload_file(blob=value, path="./data//tensor") is None
+    assert program.instructions == [
+        {
+            "op": "upload",
+            "kind": "file",
+            "blob": compute_blob_hash(bytes(value)),
+            "path": "data/tensor",
+        }
+    ]
+    value[:] = b"changed"
+    assert program._blobs == {compute_blob_hash(b"file contents"): b"file contents"}
+    assert program._ids == set()
+
+    with pytest.raises(ValueError, match="must be relative"):
+        Program().upload_file(blob=b"x", path="/tmp/tensor")
+    with pytest.raises(ValueError, match=r"'\.\.' component"):
+        Program().upload_file(blob=b"x", path="data/../tensor")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'id'"):
+        Program().upload_file(id="file", blob=b"x", path="tensor")
+    with pytest.raises(TypeError, match="bytes-like"):
+        Program().upload_file(blob="text", path="tensor")
 
 
 def test_numpy_tensor_builder_uses_raw_byte_hash():

@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _default_disk_cache_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME")
+    cache_home = Path(base) if base and Path(base).is_absolute() else Path.home() / ".cache"
+    return cache_home / "kcoral" / "files"
 
 
 @dataclass(frozen=True)
@@ -13,6 +20,8 @@ class ServerConfig:
     log_console: bool = True  # mirror events to stderr as well as the log file
     log_programs: bool = True  # keep each request's program JSON beside the log
     cache_capacity_bytes: int = 16 * 1024**3  # 16 GB byte cache
+    disk_cache_dir: Path | None = field(default_factory=_default_disk_cache_dir)
+    disk_cache_capacity_mbytes: int = 16 * 1024  # MiB (1024**2 bytes); 0 disables file caching
     default_timeout_seconds: float = 300.0  # per-request execution timeout
     max_timeout_seconds: float = 3600.0
     worker_wait_timeout_seconds: float = 30.0  # wait for a free worker before 503

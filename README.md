@@ -114,6 +114,8 @@ Useful options include:
 --default-timeout-seconds 300     Default execution timeout
 --output-limit-bytes 1048576      Request-level stdout/stderr capture limit
 --max-request-bytes 268435456     Maximum request body size
+--disk-cache-dir /var/cache/kcoral/files  Persistent file upload cache
+--disk-cache-capacity-mbytes 16384  File cache budget in MiB (16 GiB)
 --log-dir logs                    Event log directory; empty disables logging
 --no-log-console                  Stop mirroring events to stderr
 --no-log-programs                 Stop keeping each request's program JSON
@@ -135,6 +137,20 @@ later request depend on its process history. `--max-requests-per-worker 0` reuse
 workers instead: reset and poison detection still run, but undefined CUDA
 behaviour is no longer contained, and replacement costs enough on short requests
 that throughput numbers should record the setting.
+
+### File upload cache
+
+File uploads use a persistent disk cache; tensors, bytes, and libraries use the
+memory cache. The default directory is `$XDG_CACHE_HOME/kcoral/files` when
+`XDG_CACHE_HOME` is an absolute path, otherwise `~/.cache/kcoral/files`.
+The default capacity is 16384 MiB (16 GiB), where 1 MiB = 1024**2 bytes.
+
+Set `--disk-cache-dir` and `--disk-cache-capacity-mbytes`, or
+`ServerConfig.disk_cache_dir` and `ServerConfig.disk_cache_capacity_mbytes`, to
+override these defaults. An empty directory option (`None` in `ServerConfig`)
+or zero capacity disables file caching without falling back to the memory
+cache. Cached content survives server restarts. Caching is best-effort: storage
+failures and oversized objects do not prevent execution with supplied bytes.
 
 ## Logs
 
@@ -180,7 +196,8 @@ costs a few KB per request; `--no-log-programs` turns it off.
 ## Python client
 
 The client builds the protocol JSON and binary parts. Byte uploads preserve
-files and other binary data unchanged. Tensor uploads can use NumPy arrays,
+binary data unchanged, while file uploads copy it to a request-local path for
+scripts that expect to read from disk. Tensor uploads can use NumPy arrays,
 PyTorch tensors, objects implementing the DLPack protocol, or raw bytes
 accompanied by `dtype` and `shape`.
 
@@ -204,6 +221,19 @@ with Client("http://localhost:8000") as client:
 print(response.status)
 print(response.results["answer"])
 ```
+
+An existing script can keep opening a relative file path without being rewritten
+to accept bytes. The directory is private to this execution and is removed when
+the program ends; identical content still benefits from the blob cache:
+
+```python
+program.upload_file(blob=tensor_bytes, path="./inputs/tensor.bin")
+```
+
+Upload a local directory with `program.upload_folder("./assets", path="inputs")`.
+Both helpers snapshot content when called and return no register. See the
+[client guide](docs/client_guide.md#files-used-by-uploaded-scripts) for destination
+mapping and traversal restrictions.
 
 A kernel built elsewhere can be uploaded instead of source, which is the path
 when the build is customized beyond what a `compile_*` builtin expresses:
@@ -229,9 +259,10 @@ shows the two-server form: the client reads the GPU target, sends a normal
 another normal `/execute` request to upload and run that library on the GPU
 server. No additional endpoint or instruction format is involved.
 
-`Program.upload()` and `Program.run()` return a `Register`, which can be passed
-to later instructions. `Program.return_()` adds an explicit result; run values
-that are not returned do not appear in the response.
+Handle-producing `Program.upload()` calls and `Program.run()` return a
+`Register`, which can be passed to later instructions. A file upload returns
+`None` because it is a filesystem side effect. `Program.return_()` adds an
+explicit result; run values that are not returned do not appear in the response.
 
 The client starts with a cache-only request. When the server reports a
 `CACHE_MISS`, it retries with only the requested blobs. If concurrent cache
@@ -248,9 +279,10 @@ torch.from_numpy(value.view(np.uint8)).view(torch.bfloat16)
 
 A request contains one `program` JSON part and zero or more binary parts named
 `blob:<sha256>`. The SHA-256 digest is calculated over the raw bytes.
-Programs contain three instruction types:
+Programs contain four instruction types:
 
-- `upload`: register module source, raw bytes, a tensor, or a library.
+- `upload`: register module source, raw bytes, a tensor, or a library, or copy a file.
+- `get_function`: select a named object from an uploaded module or library.
 - `run`: call a registered function with recursively encoded arguments.
 - `return`: expose a previously computed value under a result key.
 

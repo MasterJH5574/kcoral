@@ -266,6 +266,44 @@ types carried by `ml_dtypes`. To hand one to torch, reinterpret the raw bytes:
 torch.from_numpy(value.view(np.uint8)).view(torch.bfloat16)
 ```
 
+## Files used by uploaded scripts
+
+Use `upload_file` when uploaded Python code expects a relative file path:
+
+```python
+program = Program()
+program.upload_file(blob=tensor_bytes, path="./inputs/tensor.bin")
+module = program.upload(id="reader_module", kind="module", source=READER_SOURCE)
+reader = program.get_function(id="reader", module=module, name="main")
+result = program.run(id="result", fn=reader)
+```
+
+The module can use `open("inputs/tensor.bin", "rb")` unchanged. File uploads
+return no register. Put them before any instruction that reads the files,
+including a module upload whose top-level code opens them.
+
+To snapshot a local directory at the current program position:
+
+```python
+program.upload_folder("./assets", path="inputs")
+```
+
+`assets/a` becomes `inputs/a`; `assets/sub/b` becomes `inputs/sub/b`. Both helpers
+snapshot content when called, so later changes to the supplied bytes or local
+files do not affect execution or retries. Folder uploads include hidden files
+and reject symbolic links (including the source directory), repeated directories,
+and special files such as FIFOs. Empty directories and original permissions and
+timestamps are omitted; an empty folder adds no instructions.
+
+Destinations must be relative POSIX paths without `..` components. Duplicate
+paths and file/directory conflicts are rejected; parent directories are created
+automatically. A traversal, read, or destination-validation failure leaves the
+program unchanged.
+
+Each execution gets a fresh working directory, removed after completion,
+failure, timeout, or worker crash. Caching is automatic and best-effort.
+The workspace is not a sandbox for uploaded Python code.
+
 ## Calling builtins from uploaded code
 
 An uploaded module executes in the worker process, where the server package
