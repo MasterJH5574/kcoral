@@ -10,7 +10,7 @@ description: >-
 
 # KCoral client
 
-Facts needed to write a protocol-conformant client. `docs/protocol.md` is the
+Facts needed to write a protocol-conformant client. `docs/client-guide/protocol.md` is the
 authoritative field-level specification; where this page and that file
 disagree, that file wins.
 
@@ -117,7 +117,7 @@ hidden files and empty directories. Missing paths, symlinks, and special files
 fail collection. Earlier returns survive later ordinary instruction failures.
 Saves require an existing parent; file replacement needs `overwrite=True`, and
 folder destinations must be new. Transfers are buffered and subject to server
-limits. See [client usage](../../../docs/client_guide.md#returning-files-and-folders).
+limits. See [client usage](../../../docs/client-guide/writing-a-program.md#returning-files-and-folders).
 
 ## Instructions
 
@@ -271,15 +271,15 @@ hash: on `status: CACHE_MISS`, resend the program with the parts listed in
 `missing_blobs`, and resend every blob if that retry misses again. Responses
 containing tensors or bytes are multipart with a `result` JSON part and
 `return:<index>` binary parts. The typed value encoding, blob-cache rules, and
-full error table are in `docs/protocol.md`.
+full error table are in `docs/client-guide/protocol.md`.
 
 ## References
 
-- `docs/protocol.md` — field-level wire specification: request envelope,
+- `docs/client-guide/protocol.md` — field-level wire specification: request envelope,
   value encoding, library upload build routes (TVM FFI, TIRx
   `export_library`, CuTeDSL `--enable-tvm-ffi`) and their link flags, full
   HTTP error table.
-- `docs/client_guide.md` — narrative guide: server-side compile vs prebuilt
+- `docs/client-guide/writing-a-program.md` — narrative guide: server-side compile vs prebuilt
   library trade-offs, measurement guidance.
 - `examples/remote_compile_client.py` — runnable: all four languages compiled
   on the server.

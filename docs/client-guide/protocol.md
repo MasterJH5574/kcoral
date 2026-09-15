@@ -5,7 +5,7 @@
 KCoral exposes two HTTP endpoints. HTTP is the request-and-response transport;
 JSON is the text format used for structured fields. A program is an ordered list
 of instructions, executed in one request with no persistent session handles.
-This page describes a direct server. The [Router](server/router.md) preserves
+This page describes a direct server. The [Router](../server-guide/router.md) preserves
 the execution protocol while adding node selection and routing metadata.
 
 ## Endpoints
@@ -192,8 +192,8 @@ CUDA source is retained for compilation. Upload binds the whole module, and
 callable: a compiler tool may consume it first.
 
 All Python-based kernel languages use the same module upload shape; their
-compilation choices belong in [Builtin Tools](reference/builtins.md) and the
-[benchmark tutorial](tutorials/benchmark-kernel.md#languages-supported-by-remote-compilation).
+compilation choices belong in [Builtin Tools](builtin-tools.md) and the
+[benchmark tutorial](../tutorials/benchmark-kernel.md#languages-supported-by-remote-compilation).
 
 <a id="cuda-c-modules"></a>
 <a id="cutedsl-modules"></a>
@@ -505,7 +505,7 @@ value but does not include it in the response; add a `return` to expose it.
 <a id="builtins"></a>
 
 The server supplies named functions for allocation, compilation, correctness
-checks and measurement. [Builtin Tools](reference/builtins.md) defines their
+checks and measurement. [Builtin Tools](builtin-tools.md) defines their
 arguments, defaults, returned fields and device requirements.
 
 ### return
@@ -526,7 +526,9 @@ Select an earlier value for the response.
 |---|---|---:|---|
 | `op` | string | yes | `"return"` |
 | `key` | string | yes | Unique key in the response `results` object |
-| `value` | `{"$ref": id}` | yes | Earlier handle to return |
+| `value` | `{"$ref": id}` | For value returns | Earlier handle to return; omit `kind` and `path` |
+| `kind` | string | For file/folder returns | `"file"` or `"folder"`; omit `value` |
+| `path` | string or `{"$ref": id}` | For file/folder returns | Workspace path, supplied literally or through an earlier handle |
 
 #### Details
 
@@ -536,10 +538,15 @@ program can interleave returns with the uploads and runs that follow them. A
 `return` that has already run contributes its entry to `results` even if a later
 instruction fails.
 
-### File and folder selection
+#### File and folder selection
 
 ```json
 {"op": "return", "key": "report", "kind": "file", "path": "outputs/report.txt"}
+```
+
+To return a folder whose path is held in an earlier register:
+
+```json
 {"op": "return", "key": "debug", "kind": "folder", "path": {"$ref": "output_path"}}
 ```
 
@@ -832,13 +839,13 @@ The multipart request includes `blob:<input_sha256>` with the raw input tensor.
 ## Python client
 
 The Python package constructs request parts, hashes and response values for you.
-Follow the [quickstart](getting-started/quickstart.md) for a first request, the
-[program guide](client_guide.md) for client construction and lifecycle, and the
-[Python interface reference](reference/python-api.rst) for signatures and errors.
+Follow the [quickstart](../getting-started/quickstart.md) for a first request, the
+[program guide](writing-a-program.md) for client construction and lifecycle, and the
+[Python interface reference](../python-api/index.rst) for signatures and errors.
 
 `upload_folder` expands into ordinary file-upload instructions and introduces
 no new protocol operation. File uploads return no register; see
-[files used by uploaded scripts](client_guide.md#files-used-by-uploaded-scripts).
+[files used by uploaded scripts](writing-a-program.md#files-used-by-uploaded-scripts).
 
 File/folder results decode to `ReturnedFile` and `ReturnedFolder`; see
-[client usage](client_guide.md#returning-files-and-folders).
+[client usage](writing-a-program.md#returning-files-and-folders).
