@@ -16,6 +16,7 @@ from .client import (
     TransportError,
 )
 from .config import ServerConfig
+from .functions import RemoteExecutionError, RemoteFunction
 from .schemas import parse_program
 
 if TYPE_CHECKING:
@@ -28,6 +29,8 @@ __all__ = [
     "ProgramResult",
     "ProtocolError",
     "Register",
+    "RemoteExecutionError",
+    "RemoteFunction",
     "ReturnedFile",
     "ReturnedFolder",
     "ServerConfig",

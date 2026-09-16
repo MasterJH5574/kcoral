@@ -32,6 +32,38 @@ every request. If you do not use `with`, call `client.close()` explicitly.
 execution. Pass `timeout_seconds` to `execute()` for a server-side execution
 deadline, and `output_limit_bytes` to limit captured output per stream.
 
+## Remote functions
+
+Use `@client.function()` for a self-contained Python function. Configure the server
+address on `Client`; decorated functions reuse its connections and headers:
+
+```python
+from kcoral import Client
+
+with Client("http://localhost:8000") as client:
+
+    @client.function(timeout=30)
+    def gpu_sum(n):
+        import torch
+
+        return torch.arange(n, device="cuda").sum().item()
+
+    print(gpu_sum.remote(4))  # 6
+```
+
+Save the function in a Python file, import dependencies inside it, and install
+them on the server. Closures, external globals, additional decorators, async
+functions and generators are unsupported. Arguments accept JSON values, bytes
+and tensors; bytes and tensors must be whole arguments, not nested in containers.
+Returned tensors are local NumPy arrays. Each remote call has no retained state.
+See `examples/remote_function.py` for a tensor upload/run/download example.
+
+Ordinary calls such as `gpu_sum(4)` execute locally. `.remote()` raises
+`RemoteExecutionError` on an instruction failure; its `.result` retains the error,
+traceback and captured output. `.execute()` returns the full `ProgramResult`,
+including failed outcomes. `.build_program()` builds the equivalent `Program`
+without executing it. Keep the client open for remote calls.
+
 ## Build instructions with Program
 
 The builder returns a `Register` when an instruction produces a value. A register

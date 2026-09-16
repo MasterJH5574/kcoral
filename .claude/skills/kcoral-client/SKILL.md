@@ -33,6 +33,13 @@ disagree, that file wins.
 
 ## Python client
 
+For simple tasks, use `@client.function(timeout=30)` and call `.remote()` for the
+decoded value, or `.execute()` for the full `ProgramResult`. Define the function
+in a file, import dependencies inside it, and pass inputs explicitly. Configure
+the server on `Client` and keep it open for remote calls. See
+[Remote functions](../../../docs/client-guide/writing-a-program.md#remote-functions)
+for supported inputs and execution boundaries.
+
 Upload a harness, select its entry point, run it and return what you want to inspect:
 
 ```python

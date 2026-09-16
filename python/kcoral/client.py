@@ -7,10 +7,10 @@ import math
 import os
 import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 import httpx
 import ml_dtypes
@@ -27,6 +27,12 @@ from .schemas import (
     validate_and_add_file_path,
     validate_and_add_file_paths,
 )
+
+if TYPE_CHECKING:
+    from .functions import RemoteFunction
+
+_Parameters = ParamSpec("_Parameters")
+_ReturnType = TypeVar("_ReturnType")
 
 
 class KCoralError(Exception):
@@ -463,6 +469,42 @@ class Client:
     def close(self) -> None:
         """Release the underlying HTTP client's connections."""
         self._http.close()
+
+    def function(
+        self,
+        *,
+        timeout: float | None = None,
+        output_limit_bytes: int | None = None,
+        cpu_only: bool = False,
+    ) -> Callable[[Callable[_Parameters, _ReturnType]], RemoteFunction[_Parameters, _ReturnType]]:
+        """Decorate a self-contained Python function for this server.
+
+        :param timeout: Server execution limit in seconds, subject to its maximum.
+        :param output_limit_bytes: Captured output limit per stream.
+        :param cpu_only: Whether the function touches no GPU.
+        :returns: A decorator producing a :class:`RemoteFunction`. Its
+            ``remote()`` method returns the decoded value; ``execute()`` returns
+            the full :class:`ProgramResult`. Ordinary calls execute locally.
+
+        The function must have available Python source, no captured variables,
+        and no external globals. Import dependencies inside the function.
+        Calls reuse this client's server address, headers and connections. Keep it open
+        for the duration of remote calls.
+        """
+        from .functions import RemoteFunction
+
+        def decorate(
+            fn: Callable[_Parameters, _ReturnType],
+        ) -> RemoteFunction[_Parameters, _ReturnType]:
+            return RemoteFunction(
+                fn,
+                client=self,
+                timeout=timeout,
+                output_limit_bytes=output_limit_bytes,
+                cpu_only=cpu_only,
+            )
+
+        return decorate
 
     def execute(
         self,
