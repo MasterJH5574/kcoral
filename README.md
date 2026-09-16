@@ -1,4 +1,9 @@
-# KCoral
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/brand/kcoral-logo-dark.png" />
+    <img src="docs/_static/brand/kcoral-logo-light.png" alt="KCoral" width="480" />
+  </picture>
+</p>
 
 KCoral executes GPU benchmark programs over HTTP. It can also run as a CPU
 compilation service: upload code and data, call functions, and explicitly return
