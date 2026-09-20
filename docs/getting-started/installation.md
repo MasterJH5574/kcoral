@@ -51,6 +51,12 @@ and environment manager. Choose one of the environments below. Each command
 creates `.venv`, installs KCoral with the client and server dependencies, and
 uses the versions recorded in `uv.lock`. uv downloads Python 3.12 if needed.
 
+For [filesystem isolation](../server-guide/launch-the-server.md#isolate-worker-files-with-bubblewrap),
+install [bubblewrap](https://github.com/containers/bubblewrap) separately on Linux.
+It needs `--disable-userns` support and permission to create unprivileged user
+namespaces, including inside containers. If unavailable, the server warns and
+runs without isolation.
+
 <a id="running-gpu-programs"></a>
 
 ### GPU server

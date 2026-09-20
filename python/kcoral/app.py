@@ -6,6 +6,7 @@ import asyncio
 import json
 import traceback
 import uuid
+import warnings
 from collections import Counter
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from . import sandbox
 from .cache import ByteCache, DiskFileCache
 from .config import ServerConfig
 from .errors import ValidationError
@@ -78,6 +80,10 @@ def create_app(
         raise ValueError(f"device must be 'cpu' or 'gpu', got {config.device!r}")
     if config.disk_cache_capacity_mbytes < 0:
         raise ValueError("disk cache capacity must be non-negative")
+    if config.sandbox not in ("none", "bubblewrap"):
+        raise ValueError("sandbox must be 'none' or 'bubblewrap'")
+    if config.sandbox_readonly_paths and config.sandbox == "none":
+        raise ValueError("sandbox_readonly_paths requires sandbox='bubblewrap'")
     worker_gpus = config.gpus if config.device == "gpu" else []
     cpu_workers = config.num_workers if config.device == "cpu" else None
     worker_count = (
@@ -111,6 +117,27 @@ def create_app(
             config.disk_cache_dir, config.disk_cache_capacity_mbytes * 1024**2
         )
         try:
+            app.state.sandbox = config.sandbox
+            if config.sandbox == "bubblewrap":
+                try:
+                    sandbox.probe(
+                        list(worker_gpus) if config.device == "gpu" else [None],
+                        tuple(config.sandbox_readonly_paths),
+                    )
+                except sandbox.SandboxUnavailable as exc:
+                    app.state.sandbox = "none"
+                    message = (
+                        "bubblewrap could not start; filesystem isolation is disabled "
+                        f"for this server run: {exc}"
+                    )
+                    events.emit(
+                        "sandbox_disabled",
+                        level="WARNING",
+                        sandbox="none",
+                        error=str(exc),
+                        message=message,
+                    )
+                    warnings.warn(message, RuntimeWarning, stacklevel=2)
             app.state.pool = WorkerPool(
                 worker_gpus,
                 runtime_factory,
@@ -119,6 +146,8 @@ def create_app(
                 max_requests_per_worker=config.max_requests_per_worker,
                 cpu_workers=cpu_workers,
                 events=events,
+                sandbox=app.state.sandbox,
+                sandbox_readonly_paths=tuple(config.sandbox_readonly_paths),
             )
         except BaseException as exc:
             events.emit(
@@ -131,6 +160,7 @@ def create_app(
             raise
         events.emit(
             "pool_ready",
+            sandbox=app.state.sandbox,
             mode=config.device,
             target=app.state.pool.target(),
             versions=app.state.pool.versions(),
@@ -550,6 +580,8 @@ def _describe(config: ServerConfig) -> dict[str, object]:
             if key == "node_token" and value is not None
             else str(value)
             if isinstance(value, Path)
+            else [str(path) for path in value]
+            if key == "sandbox_readonly_paths"
             else value
         )
         for key, value in asdict(config).items()

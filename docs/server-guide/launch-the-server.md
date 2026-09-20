@@ -50,11 +50,41 @@ explains how to pass a compiled library between them.
 The CPU compilation service does not provide general GPU execution.
 
 `0.0.0.0` listens on every network interface. The default `127.0.0.1` listens
-only on this machine. Workers execute uploaded Python code with the server's
-permissions; a request working directory does not isolate that code from the host.
+only on this machine. Disabling filesystem isolation lets workers execute
+uploaded Python code with the server's permissions; a request working directory
+alone does not isolate that code from the host.
 
 See [logs](logging.md) to follow a request and diagnose worker replacement.
 
+## Isolate worker files with bubblewrap
+
+By default, the server checks whether bubblewrap can start before creating
+workers. If the check fails or times out, it warns and disables isolation for
+that server run. Restart to check again. Set `--sandbox none` or
+`ServerConfig(sandbox="none")` to disable isolation and skip the check.
+See [installation requirements](../getting-started/installation.md#install-the-server).
+
+When enabled, each worker can write ordinary files only under its private
+`/work`. Other workers' files and the server's cache and logs are hidden;
+runtime dependencies are read-only, and network access is disabled.
+`/work/.kcoral` is reserved for runtime files and cannot receive uploads.
+
+`--max-requests-per-worker 0` reuses processes while clearing files and caches
+between programs. Programs must finish background work before returning;
+workers with remaining resources or failed cleanup are replaced.
+
+For dependencies outside the standard runtime directories, add read-only paths:
+
+```bash
+kcoral --sandbox-readonly-path /opt/custom-compiler
+```
+
+Repeat the option for multiple paths. Directories also enter the Python module
+search path. All workers can read these paths, so exclude private data and
+other workspaces.
+
+This feature assumes **trusted programs**. It does not isolate hostile code
+sharing an interpreter or provide GPU memory isolation.
 
 ## Configuration
 
@@ -79,6 +109,8 @@ access to its GPU while it executes or measures GPU work.
 | `--workers-per-gpu` | `8` | — | `workers_per_gpu`, used in GPU mode |
 | `--max-requests-per-worker` | `1` | — | `max_requests_per_worker`; `0` reuses workers |
 | `--worker-termination-grace-seconds` | `5` | — | `worker_termination_grace_seconds` |
+| `--sandbox` | `bubblewrap` | — | `sandbox`; `none` explicitly disables filesystem isolation |
+| `--sandbox-readonly-path` | No additional paths | — | `sandbox_readonly_paths`, a list of paths; repeatable |
 
 `--gpus` takes comma-separated physical device numbers such as `0,1`. Workers
 select their devices from this option, so setting `CUDA_VISIBLE_DEVICES` on the

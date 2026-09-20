@@ -9,6 +9,9 @@ writes it, so one file holds a request's whole history: `request_received`,
 worker that took it, and `request_finished`. One that never comes back stops
 after the record naming its worker.
 
+`sandbox_disabled` records why the startup check disabled isolation, at `WARNING`.
+`pool_ready.sandbox` reports the active mode: `bubblewrap` or `none`.
+
 `request_finished` carries a `finish_reason`: why the request ended when it did.
 
 | `finish_reason` | what happened | worker |
@@ -17,6 +20,7 @@ after the record naming its worker.
 | `program_failed` | the program raised; `error_kind` and `instruction_index` say where | keeps serving |
 | `request_limit` | `--max-requests-per-worker` reached, after answering | replaced |
 | `poisoned_context` | cleanup after the program failed, after answering | replaced |
+| `sandbox_cleanup` | sandbox resources survived the request or workspace cleanup failed | killed, replaced |
 | `timeout` | no answer inside `timeout_seconds` | killed, replaced |
 | `crashed` | the process exited mid-request; `exitcode` says how | killed, replaced |
 | `no_worker` | saturated, nothing ran | untouched |
