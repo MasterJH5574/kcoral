@@ -36,4 +36,4 @@ ENV KCORAL_SERVER_HOST=0.0.0.0
 
 EXPOSE 8000
 
-CMD ["python", "-m", "kcoral"]
+CMD ["python", "-m", "kcoral", "server"]

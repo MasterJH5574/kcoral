@@ -50,7 +50,7 @@ struct Args {
     control_reconnect_min_delay_seconds: f64,
     #[arg(long, default_value_t = 30.0)]
     control_reconnect_max_delay_seconds: f64,
-    #[arg(last = true, default_value = "kcoral")]
+    #[arg(last = true, required = true)]
     command: Vec<OsString>,
 }
 
@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         )?,
         restart_jitter: args.restart_jitter,
     };
+    supervisor_config.validate()?;
     let control_config = RouterLinkConfig {
         router_endpoint: args.router_endpoint.clone(),
         node_token: args.node_token.clone(),
@@ -98,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
             "maximum control reconnect delay",
         )?,
     };
+    control_config.validate()?;
     let mut child_environment = vec![
         (
             OsString::from("KCORAL_SERVER_HOST"),
@@ -152,4 +154,43 @@ async fn main() -> anyhow::Result<()> {
     };
     signal_task.abort();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requires_router_and_node_id() {
+        for options in [
+            vec![],
+            vec!["--router-endpoint", "http://127.0.0.1:9000"],
+            vec!["--node-id", "gpu-a"],
+        ] {
+            let mut argv = vec!["kcoral-node"];
+            argv.extend(options);
+            argv.extend(["--", "python"]);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_child_prevents_recursive_public_server_launch() {
+        let options = [
+            "kcoral-node",
+            "--router-endpoint",
+            "http://127.0.0.1:9000",
+            "--node-id",
+            "gpu-a",
+        ];
+        assert!(Args::try_parse_from(options).is_err());
+        let args = Args::try_parse_from(options.into_iter().chain([
+            "--",
+            "python",
+            "-m",
+            "kcoral._server",
+        ]))
+        .unwrap();
+        assert_eq!(args.command[0], "python");
+    }
 }

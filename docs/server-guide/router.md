@@ -12,9 +12,9 @@ binaries so their internal protocols match.
 
 | Component | Where it runs | Responsibility |
 | --- | --- | --- |
-| `kcoral-router` | A host reachable by clients and nodes | Accept HTTP requests, manage a bounded wait queue and select nodes |
-| `kcoral-node` | Each compute node | Supervise one Python server process tree and report its health |
-| Python `kcoral` server | Each compute node | Execute programs with the existing worker pool |
+| `kcoral router` | A host reachable by clients and nodes | Accept HTTP requests, manage a bounded wait queue and select nodes |
+| `kcoral server --router ...` | Each compute node | Supervise one Python server process tree and report its health |
+| Python server | Each compute node | Execute programs with the existing worker pool |
 
 HTTP is the public request-and-response protocol. Internally, gRPC is the
 streaming remote-call protocol connecting each node to the Router. It uses
@@ -38,51 +38,49 @@ Protocol Buffers compiler. Build from the repository root:
 
 ```bash
 cargo build --release --locked
+export PATH="$PWD/target/release:$PATH"
 ```
 
-Install the [Python worker environment](../getting-started/installation.md) on
-each compute node. Start the Router at an address nodes can reach:
+Install the [Python package](../getting-started/installation.md) on the Router host
+and the worker environment on each compute node. Start the Router:
 
 ```bash
 export KCORAL_NODE_TOKEN='<shared-node-token>'
-target/release/kcoral-router --host 0.0.0.0 --port 9000
+kcoral router --host 127.0.0.1 --port 9000
 ```
 
-On each node, use the same token and a distinct stable `node-id`:
+On the same machine, start a node with the same token and a stable `node-id`:
 
 ```bash
 export KCORAL_NODE_TOKEN='<shared-node-token>'
-target/release/kcoral-node \
-  --router-endpoint http://router.example.com:9000 \
-  --node-id gpu-a \
-  --server-url http://127.0.0.1:8000/
+kcoral server \
+  --router http://127.0.0.1:9000 \
+  --node-id gpu-a
 ```
 
-Replace the Router hostname and token for your deployment. The example uses
+The examples run on one machine. For remote nodes, bind the Router with
+`--host 0.0.0.0` and replace `127.0.0.1` with its reachable address. Give each node
+a distinct stable `node-id`. The example uses
 plain HTTP for a controlled network; an HTTPS endpoint requires TLS (transport
 encryption) terminated by a compatible proxy. The optional token authenticates
 node streams; it does not provide public client authorization or encryption.
 
-The node manager runs `kcoral` by default. It passes `KCORAL_ROUTER_ENDPOINT`,
-`KCORAL_NODE_ID` and the token to its child, and derives `KCORAL_SERVER_HOST` and
-`KCORAL_SERVER_PORT` from `--server-url`. That URL is the address used for local
-health checks; the Router does not connect to it.
+With `--router`, `kcoral server` starts a supervisor (the node manager) that
+manages the Python server using the current Python environment. Its health-check address follows
+`--host` and `--port`; the Router does not connect to that address.
+Without `--router`, the Python server runs directly.
 
-Everything after `--` replaces the child command. Explicit Python flags override
-the environment defaults, including when the listen address differs from the
-health-check address:
+Pass server options directly:
 
 ```bash
-target/release/kcoral-node \
-  --router-endpoint http://router.example.com:9000 \
+kcoral server \
+  --router http://127.0.0.1:9000 \
   --node-id gpu-a \
-  --server-url http://127.0.0.1:8000/ \
-  -- kcoral --host 0.0.0.0 --gpus 0 --log-dir /var/log/kcoral
+  --host 0.0.0.0 --gpus 0 --log-dir /var/log/kcoral
 ```
 
-An HTTPS health-check URL requires a local TLS endpoint; setting that URL does
-not enable TLS in the Python server. The manager requires Linux 5.3 or newer,
-access to `/proc`, and permission to signal its child processes. Run the Router
+The manager requires Linux 5.3 or newer, access to `/proc`, and permission to
+signal its child processes. Run the Router
 and node managers under your service manager so those processes are also
 restarted if they fail.
 
@@ -91,7 +89,7 @@ Clients continue using `Client`, `Program`, `POST /execute` and `GET /health`:
 ```python
 from kcoral import Client
 
-with Client("http://router.example.com:9000") as client:
+with Client("http://127.0.0.1:9000") as client:
     print(client.target())
     # client.execute(program) uses the same program format as a direct server.
 ```
@@ -167,7 +165,7 @@ The node manager checks local health every 2 seconds by default, with a 1-second
 probe timeout, 3-failure threshold and 30-second startup grace. Restart delays
 grow from 1 to 30 seconds with jitter, and reset after 60 seconds of stable running.
 
-To stop a node, send SIGTERM, the normal termination signal, to `kcoral-node`.
+To stop a node, send SIGTERM, the normal termination signal, to the `kcoral server` process.
 It withdraws healthy status and signals the Python child. Idle slots close and
 active requests finish before the child exits. Normal shutdown waits for that
 exit without imposing an additional timeout.

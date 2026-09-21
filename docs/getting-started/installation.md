@@ -85,7 +85,7 @@ Check that PyTorch, the tensor library used by workers, can access the GPU:
 
 ```bash
 python -c "import torch, tvm_ffi; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
-kcoral --help
+kcoral server --help
 ```
 
 The first command should print your GPU's name. The second should display the
@@ -115,7 +115,7 @@ python -c "import tvm_ffi; print('KCoral compiler dependencies are ready')"
 nvcc --version
 c++ --version
 ninja --version
-kcoral --help
+kcoral server --help
 ```
 
 Each command should succeed. Follow
@@ -132,7 +132,7 @@ code, install the default environment:
 ```bash
 uv sync --locked --no-editable --python 3.12
 source .venv/bin/activate
-kcoral --help
+kcoral server --help
 ```
 
 This installs the client and server packages. Add the `gpu` or `compiler` group

@@ -8,7 +8,7 @@ CUDA is NVIDIA's GPU programming platform.
 ## Start an instance
 
 ```bash
-kcoral --host 127.0.0.1 --port 8000
+kcoral server --host 127.0.0.1 --port 8000
 ```
 
 The server binds to `127.0.0.1` by default. Use `--host` or `KCORAL_SERVER_HOST` to
@@ -18,8 +18,8 @@ To compile on a machine without a GPU and execute on a separate GPU machine,
 run two instances of this same command:
 
 ```bash
-kcoral --device cpu --num-workers 16 --host 0.0.0.0 --port 8000
-kcoral --device gpu --gpus 0 --workers-per-gpu 8 --host 0.0.0.0 --port 8001
+kcoral server --device cpu --num-workers 16 --host 0.0.0.0 --port 8000
+kcoral server --device gpu --gpus 0 --workers-per-gpu 8 --host 0.0.0.0 --port 8001
 ```
 
 See [configuration](#configuration) for every option and its default.
@@ -76,7 +76,7 @@ workers with remaining resources or failed cleanup are replaced.
 For dependencies outside the standard runtime directories, add read-only paths:
 
 ```bash
-kcoral --sandbox-readonly-path /opt/custom-compiler
+kcoral server --sandbox-readonly-path /opt/custom-compiler
 ```
 
 Repeat the option for multiple paths. Directories also enter the Python module
