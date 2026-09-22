@@ -66,8 +66,71 @@ dependency files and shared static assets stay at the documentation root.
   uv pip compile --python-version 3.12 docs/requirements.in -o docs/requirements.txt
   ```
 
-- The documentation workflow builds every page and uploads the website for
-  review. Public deployment can be added after a hosting destination is chosen.
+- Pull requests build the documentation and upload an HTML artifact for review.
+  They do not publish a preview site.
+
+## Build the versioned website
+
+The public website lives at <https://kcoral.mlc.ai/docs/>. Its sidebar includes
+a version menu. `latest` follows `main`; stable release tags such as `v0.1.0`
+have their own permanent URLs:
+
+```text
+/docs/                 redirects to /docs/latest/
+/docs/latest/          documentation from main
+/docs/v0.1.0/          documentation from tag v0.1.0
+```
+
+Switching versions opens that version's documentation home page. Tags must use
+the form `vMAJOR.MINOR.PATCH` and contain the documentation configuration and
+dependencies. Prerelease tags are not published. Treat published tags as
+immutable: changing or removing a tag changes the site on the next deployment.
+
+Build and serve the complete website from the repository root with Python 3.12
+and `uv` available:
+
+```bash
+git fetch origin --tags
+python scripts/build_docs.py
+python -m http.server 8008 --bind 127.0.0.1 --directory _site
+```
+
+Open `http://127.0.0.1:8008/docs/`. The builder uses the current checkout for
+`latest` and extracts each stable tag into a temporary directory. Each version
+gets a separate Python environment, its own locked documentation dependencies,
+and a non-editable installation of its own KCoral package. This ensures that
+the API reference describes the selected release. No GPU toolchain is needed.
+
+Use `python scripts/build_docs.py --latest-only` to skip release builds while
+editing. `_site/` is generated output and is not committed to this repository.
+A failed build preserves the previous output. The usual single-version Sphinx
+command above remains available for quick local edits.
+
+## Publish the website
+
+The `Documentation` workflow rebuilds the website after a push to `main`, a
+version tag push, or a manual run on `main`. It publishes the HTML artifact to
+the public [kcoral-docs repository](https://github.com/mlc-ai/kcoral-docs), which
+serves it through GitHub Pages. This keeps the source repository private while
+allowing public documentation on GitHub Free. Only generated documentation,
+including the documented example downloads and page sources, is published.
+
+The deployment job uses the `DOCS_DEPLOY_KEY` Actions secret: an SSH deploy key
+with write access only to `mlc-ai/kcoral-docs`. Pull requests and manual runs on
+other branches only build an artifact; they cannot publish.
+
+The hosting repository's Pages source is `main` at `/`, with custom domain
+`kcoral.mlc.ai`. Its root `CNAME` and `.nojekyll` files are maintained by the
+workflow. The `mlc.ai` DNS zone needs this record:
+
+```text
+CNAME  kcoral  mlc-ai.github.io
+```
+
+After GitHub issues the domain's certificate, enable **Enforce HTTPS** in the
+hosting repository's Pages settings. To undo a documentation change, revert it
+in the source repository and let the workflow publish again. Do not edit
+generated HTML in the hosting repository: the next deployment replaces it.
 
 ## Run project checks
 
