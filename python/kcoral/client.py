@@ -92,11 +92,16 @@ class Program:
     and required binary data. Each instruction identifier and return key must
     be unique within this program. Only values selected by :meth:`return_`
     appear in the response.
+
+    Each value-producing instruction automatically receives an ID such as
+    ``upload_0``, ``get_function_1``, or ``run_2``. Use the optional ``id`` field
+    to customize it.
     """
 
     _instructions: list[dict[str, Any]] = field(default_factory=list, init=False)
     _blobs: dict[str, bytes] = field(default_factory=dict, init=False)
     _ids: set[str] = field(default_factory=set, init=False)
+    _next_id: int = field(default=0, init=False)
     _return_keys: set[str] = field(default_factory=set, init=False)
     _file_paths: set[str] = field(default_factory=set, init=False)
 
@@ -167,7 +172,7 @@ class Program:
     def upload(
         self,
         *,
-        id: str,
+        id: str | None = None,
         kind: str,
         source: str | None = None,
         language: str = "python",
@@ -177,7 +182,6 @@ class Program:
     ) -> Register:
         """Upload source or binary content and return its request-local register.
 
-        :param id: Unique, nonempty instruction identifier.
         :param kind: One of ``module``, ``tensor``, ``bytes`` or ``library``.
         :param source: Source text for a module upload.
         :param language: Module language, ``python`` or ``cuda``.
@@ -186,6 +190,7 @@ class Program:
             the DLPack tensor exchange protocol, or raw bytes.
         :param dtype: Element type for a tensor supplied as raw bytes.
         :param shape: Dimensions for a tensor supplied as raw bytes.
+        :param id: Optional custom instruction identifier. Must be nonempty and unique.
         :returns: A register usable by later instructions.
         :raises TypeError: If the input does not match the upload kind.
         :raises ValueError: If the kind, identifier or tensor metadata is invalid.
@@ -201,7 +206,7 @@ class Program:
                 raise TypeError("module upload does not accept tensor fields")
             if language not in ("python", "cuda"):
                 raise ValueError("module upload 'language' must be 'python' or 'cuda'")
-            instruction = {"op": "upload", "id": id, "kind": "module", "source": source}
+            instruction = {"op": "upload", "kind": "module", "source": source}
             if language != "python":
                 instruction["language"] = language
         elif kind == "tensor":
@@ -214,7 +219,6 @@ class Program:
             self._blobs.setdefault(blob_hash, raw)
             instruction = {
                 "op": "upload",
-                "id": id,
                 "kind": "tensor",
                 "blob": blob_hash,
                 "dtype": tensor_dtype,
@@ -235,7 +239,6 @@ class Program:
             self._blobs.setdefault(blob_hash, raw)
             instruction = {
                 "op": "upload",
-                "id": id,
                 "kind": "bytes",
                 "blob": blob_hash,
             }
@@ -249,30 +252,30 @@ class Program:
             self._blobs.setdefault(blob_hash, raw)
             instruction = {
                 "op": "upload",
-                "id": id,
                 "kind": "library",
                 "blob": blob_hash,
             }
         else:
             raise ValueError("upload kind must be 'module', 'tensor', 'bytes', or 'library'")
-        self._add_id(id)
+        id = self._add_id(id, op="upload")
+        instruction["id"] = id
         self._instructions.append(instruction)
         return Register(id)
 
     def get_function(
         self,
         *,
-        id: str,
+        id: str | None = None,
         module: Register | dict[str, str],
         name: str,
         cpu_only: bool = False,
     ) -> Register:
         """Select a named function from an earlier module or library upload.
 
-        :param id: Unique identifier for the selected function.
         :param module: An earlier upload register or ``{"$ref": "id"}`` reference.
         :param name: Nonempty function name exported by the module or library.
         :param cpu_only: Declare that the function does not access the GPU.
+        :param id: Optional custom instruction identifier. Must be nonempty and unique.
         :returns: A function register for a later :meth:`run` instruction.
         :raises TypeError: If the reference or flag has an invalid type.
         :raises ValueError: If an identifier, reference or function name is invalid.
@@ -294,22 +297,24 @@ class Program:
             raise ValueError("function name must be a non-empty string")
         if not isinstance(cpu_only, bool):
             raise TypeError("cpu_only must be a bool")
+        id = self._add_id(id, op="get_function")
         instruction = {"op": "get_function", "id": id, "module": reference, "name": name}
         if cpu_only:
             instruction["cpu_only"] = True
-        self._add_id(id)
         self._instructions.append(instruction)
         return Register(id)
 
-    def run(self, *, id: str, fn: Register, args: list[Any] | None = None) -> Register:
+    def run(
+        self, *, id: str | None = None, fn: Register, args: list[Any] | None = None
+    ) -> Register:
         """Append a function call and return a register for its result.
 
-        :param id: Unique identifier for the computed result.
         :param fn: The :class:`Register` returned by :meth:`get_function`,
             or by an earlier :meth:`run` that returned a callable.
         :param args: Positional arguments; omitted or ``None`` means no arguments.
             Top-level registers are encoded automatically. Nested lists and
             dictionaries remain JSON literals, including reference-shaped objects.
+        :param id: Optional custom instruction identifier. Must be nonempty and unique.
         :returns: A register, without automatically returning the value to the client.
         :raises TypeError: If ``fn`` is not a :class:`Register`.
         :raises ValueError: If an identifier is invalid or a reference is unknown.
@@ -319,11 +324,11 @@ class Program:
         if fn.id not in self._ids:
             raise ValueError(f"run {id!r} references unknown handle {fn.id!r}")
         wire_fn = _reference(fn)
-        self._add_id(id)
         wire_args = [
             _reference(argument) if isinstance(argument, Register) else argument
             for argument in (args or [])
         ]
+        id = self._add_id(id, op="run")
         self._instructions.append({"op": "run", "id": id, "fn": wire_fn, "args": wire_args})
         return Register(id)
 
@@ -377,12 +382,17 @@ class Program:
         self._return_keys.add(key)
         self._instructions.append({"op": "return", "key": key, "value": reference})
 
-    def _add_id(self, instruction_id: str | None) -> None:
+    def _add_id(self, instruction_id: str | None, *, op: str) -> str:
+        if instruction_id is None:
+            while (instruction_id := f"{op}_{self._next_id}") in self._ids:
+                self._next_id += 1
+            self._next_id += 1
         if not isinstance(instruction_id, str) or not instruction_id:
             raise ValueError("instruction id must be a non-empty string")
         if instruction_id in self._ids:
             raise ValueError(f"duplicate instruction id: {instruction_id!r}")
         self._ids.add(instruction_id)
+        return instruction_id
 
 
 @dataclass
