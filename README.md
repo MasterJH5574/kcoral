@@ -117,8 +117,3 @@ Programs contain `upload`, `get_function`, `run` and `return` instructions.
 The [protocol](docs/client-guide/protocol.md) defines requests, results, caching and errors.
 [Tutorials](docs/tutorials/benchmark-kernel.md) cover remote compilation, library
 uploads and separate compilation/execution servers.
-
-## Development
-
-[Build the documentation locally](docs/development-guide/build-the-docs.md#build-and-preview-the-documentation)
-to browse the full site with navigation and search at `http://127.0.0.1:8008`.
