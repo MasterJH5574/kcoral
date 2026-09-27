@@ -40,6 +40,26 @@ This installs the package with client dependencies. Use `pip install ".[server]"
 for both GPU execution and CPU compilation dependencies. See
 [installation](docs/getting-started/installation.md) for source build and system requirements.
 
+## Run remote tools
+
+```bash
+export KCORAL_URL='http://SERVER_HOST:PORT'
+kcoral run python --send experiment -- experiment/check.py
+kcoral run compute-sanitizer --send experiment -- python experiment/check.py
+kcoral run ncu --send experiment --out artifacts/ncu \
+  -- --set basic --launch-count 1 -- python experiment/capture.py
+kcoral run run-iket --send experiment --out artifacts/iket \
+  -- profile --postprocess json -- python experiment/capture.py
+kcoral run shell --send experiment -- bash experiment/setup.sh
+```
+
+Any remote tool also accepts `--host HOST --port PORT`, for example
+`kcoral run python --host localhost --port 8000 --send experiment -- experiment/check.py`.
+These options override `KCORAL_URL`, with a warning showing the address used.
+
+See [Builtin CLI Tools](docs/client-guide/builtin-cli-tools.md) for common options and a
+separate guide to each tool, including dependencies, examples, and returned files.
+
 ## Run the server
 
 After installing the worker environment:
