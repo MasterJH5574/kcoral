@@ -6,22 +6,19 @@ tensor on its GPU and returns the result.
 ## Required hardware
 
 You need one Linux machine with an NVIDIA GPU and a compatible driver. Install
-the [GPU server environment](installation.md#gpu-server) on it; this
-also installs the client. The example uses PyTorch, a tensor library included
-in that environment, and does not compile a custom kernel.
+the [GPU server environment](installation.md#server-system-requirements) on it; this
+also installs the client. The example uses PyTorch and does not compile a
+custom kernel.
 
 The steps below run the server and client on that same machine, in two
-terminals. A CPU (central processing unit) compilation server cannot run this
-program: the uploaded function checks that the tensor is on a GPU before
-doing arithmetic.
+terminals. A CPU compilation server cannot run this program: the uploaded
+function checks that the tensor is on a GPU before doing arithmetic.
 
 ## Launch the server
 
-In the first terminal, open the repository directory, activate the installed
-environment, and start one worker on GPU 0:
+In the first terminal, start one worker on GPU 0:
 
 ```bash
-source .venv/bin/activate
 kcoral server --device gpu --gpus 0 --workers-per-gpu 1 --host 127.0.0.1 --port 8000
 ```
 
@@ -31,14 +28,7 @@ and leave this terminal running. The client will connect to
 
 ## Submit the program
 
-In a second terminal, open the same repository directory and activate the
-environment:
-
-```bash
-source .venv/bin/activate
-```
-
-Save the following complete program as `first_program.py`:
+In a second terminal, save the following complete program as `first_program.py`:
 
 ```{literalinclude} ../../examples/first_program.py
 :language: python

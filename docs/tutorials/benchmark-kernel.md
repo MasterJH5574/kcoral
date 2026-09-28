@@ -7,7 +7,7 @@ compilation and measurement code.
 
 ## Prerequisites
 
-Install the [GPU worker environment](../getting-started/installation.md#gpu-server)
+Install the [GPU worker environment](../getting-started/installation.md#server-system-requirements)
 and [launch the server](../server-guide/launch-the-server.md). The first example
 uses TIRx, TVM's Python-embedded kernel language.
 
@@ -17,9 +17,24 @@ uses TIRx, TVM's Python-embedded kernel language.
 KCORAL_URL=http://localhost:8000 python examples/benchmark_kernel.py
 ```
 
+<div class="code-example">
+<div class="code-example-preview">
+
+```{literalinclude} ../../examples/benchmark_kernel.py
+:language: python
+:lines: 1-24
+```
+
+</div>
+<details>
+<summary><span class="code-example-expand">Show full source</span><span class="code-example-collapse">Show less</span>: <code>benchmark_kernel.py</code></summary>
+
 ```{literalinclude} ../../examples/benchmark_kernel.py
 :language: python
 ```
+
+</details>
+</div>
 
 {download}`Download the example <../../examples/benchmark_kernel.py>`.
 
@@ -129,9 +144,24 @@ Set `KCORAL_URL` to the GPU server address.
 KCORAL_URL=http://localhost:8000 python examples/remote_compile_client.py
 ```
 
+<div class="code-example">
+<div class="code-example-preview">
+
+```{literalinclude} ../../examples/remote_compile_client.py
+:language: python
+:lines: 1-24
+```
+
+</div>
+<details>
+<summary><span class="code-example-expand">Show full source</span><span class="code-example-collapse">Show less</span>: <code>remote_compile_client.py</code></summary>
+
 ```{literalinclude} ../../examples/remote_compile_client.py
 :language: python
 ```
+
+</details>
+</div>
 
 {download}`Download the client <../../examples/remote_compile_client.py>`.
 
@@ -140,15 +170,30 @@ KCORAL_URL=http://localhost:8000 python examples/remote_compile_client.py
 This client builds a CUDA C library locally for the server's target architecture,
 then uploads, checks and measures it. The client machine needs the CUDA toolkit,
 a host C++ compiler and TVM FFI from the
-[compiler environment](../getting-started/installation.md#cpu-compilation-server).
+[compiler environment](../getting-started/installation.md#server-system-requirements).
 
 ```bash
 KCORAL_URL=http://localhost:8000 python examples/library_upload_client.py
 ```
 
+<div class="code-example">
+<div class="code-example-preview">
+
+```{literalinclude} ../../examples/library_upload_client.py
+:language: python
+:lines: 1-24
+```
+
+</div>
+<details>
+<summary><span class="code-example-expand">Show full source</span><span class="code-example-collapse">Show less</span>: <code>library_upload_client.py</code></summary>
+
 ```{literalinclude} ../../examples/library_upload_client.py
 :language: python
 ```
+
+</details>
+</div>
 
 {download}`Download the client <../../examples/library_upload_client.py>`.
 

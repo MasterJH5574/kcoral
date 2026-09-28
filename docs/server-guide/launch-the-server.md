@@ -1,9 +1,8 @@
 # Launch the server
 
 Install the [worker environment](../getting-started/installation.md) that matches
-your programs first. A GPU worker executes programs on a graphics processing
-unit; a CPU worker compiles CUDA C on a central processing unit without a GPU.
-CUDA is NVIDIA's GPU programming platform.
+your programs first. Use GPU workers to execute programs and CPU workers to
+compile CUDA C without a GPU.
 
 ## Start an instance
 
@@ -58,11 +57,13 @@ See [logs](logging.md) to follow a request and diagnose worker replacement.
 
 ## Isolate worker files with bubblewrap
 
+The host or container must allow unprivileged user namespaces.
+
 By default, the server checks whether bubblewrap can start before creating
 workers. If the check fails or times out, it warns and disables isolation for
 that server run. Restart to check again. Set `--sandbox none` or
 `ServerConfig(sandbox="none")` to disable isolation and skip the check.
-See [installation requirements](../getting-started/installation.md#install-the-server).
+See [installation requirements](../getting-started/installation.md#server-system-requirements).
 
 When enabled, each worker can write ordinary files only under its private
 `/work`. Other workers' files and the server's cache and logs are hidden;
@@ -89,13 +90,12 @@ sharing an interpreter or provide GPU memory isolation.
 ## Configuration
 
 The command-line interface accepts the options below. Python applications pass
-the corresponding fields to `ServerConfig`, the server configuration object.
+the corresponding fields to `ServerConfig`.
 Explicit command-line options take precedence over environment variables.
 Defaults in this table assume none of those environment variables is set.
 
-CPU means central processing unit. A worker
-is a process that executes one request at a time. A lease gives a worker exclusive
-access to its GPU while it executes or measures GPU work.
+A worker is a process that executes one request at a time. A lease gives a
+worker exclusive access to its GPU while it executes or measures GPU work.
 
 ### Binding and worker selection
 
@@ -124,8 +124,8 @@ Record this setting when comparing throughput.
 
 ### Time and size limits
 
-MiB means 1024 squared bytes; GiB means 1024 cubed bytes. All options ending in
-`-bytes` take an integer number of bytes, not a value with a unit suffix.
+All options ending in `-bytes` take an integer number of bytes, not a value
+with a unit suffix.
 
 | Option | Default | Configuration field | Meaning |
 | --- | --- | --- | --- |
@@ -144,7 +144,7 @@ GPU lease. It defaults to 5 minutes and is capped at 15 minutes, so a long queue
 wait does not give a running program a longer execution budget.
 
 Request `timeout_seconds` and `output_limit_bytes` override their respective
-defaults, up to these server maximums. See [protocol options](../client-guide/protocol.md#options)
+defaults, up to these server maximums. See {ref}`protocol options <options>`
 for clamping and [errors](../client-guide/protocol.md#errors) for request failures.
 
 ### File upload cache
