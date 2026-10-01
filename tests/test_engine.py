@@ -373,6 +373,7 @@ def test_file_upload_copies_nested_file_without_taking_the_gpu(tmp_path):
     digest = compute_blob_hash(raw)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+
     class CleanupLease(RecordingLease):
         def acquire(self):
             # File staging has already finished when final cleanup takes the GPU.
@@ -382,7 +383,9 @@ def test_file_upload_copies_nested_file_without_taking_the_gpu(tmp_path):
     lease = CleanupLease()
 
     outcome = execute(
-        Program([FileUpload(blob=digest, path="nested/tensor")], blob_bytes={digest: raw}),
+        Program(
+            [FileUpload(id="file", blob=digest, path="nested/tensor")], blob_bytes={digest: raw}
+        ),
         FakeRuntime(),
         lease,
         workspace_dir=str(workspace),
@@ -400,7 +403,7 @@ def test_uploaded_module_reads_file_relative_to_request_workspace():
     outcome = execute_for_test(
         Program(
             [
-                FileUpload(blob=digest, path="input/data.bin"),
+                FileUpload(id="file", blob=digest, path="input/data.bin"),
                 Upload("module", "module", source=source),
                 GetFunction("fn", ref("module"), "main"),
                 Run("value", ref("fn"), []),
@@ -428,7 +431,7 @@ def test_file_upload_does_not_follow_workspace_symlink(tmp_path):
         Program(
             [
                 Upload("module", "module", source=source),
-                FileUpload(blob=digest, path="escape/tensor"),
+                FileUpload(id="file", blob=digest, path="escape/tensor"),
             ],
             blob_bytes={digest: raw},
         ),
@@ -439,35 +442,18 @@ def test_file_upload_does_not_follow_workspace_symlink(tmp_path):
     assert outcome.status == "FAILED"
     assert outcome.error["kind"] == "runtime"
     assert outcome.error["instruction_index"] == 1
-    assert outcome.error["instruction_id"] is None
+    assert outcome.error["instruction_id"] == "file"
     assert not (outside / "tensor").exists()
 
 
-class CudaAwareRuntime(FakeRuntime):
-    """The fake runtime has no compiler; the real one binds CUDA source text."""
-
-    def load_module(self, source, language="python"):
-        if language == "cuda":
-            return object()
-        return super().load_module(source, language)
-
-
-@pytest.mark.parametrize(
-    "language,source,held_during_upload",
-    [
-        # A CUDA upload runs nothing; only final cleanup needs the GPU.
-        ("cuda", "void go() {}", 0),
-        # A Python upload execs the client's source, which could touch one.
-        ("python", "def main(x):\n    return x\n", 1),
-    ],
-)
-def test_which_module_uploads_take_the_gpu(language, source, held_during_upload):
+def test_python_module_upload_takes_the_gpu():
     lease = RecordingLease()
-    program = Program([Upload("k", "module", source=source, language=language)])
-    class PlacementRuntime(CudaAwareRuntime):
-        def load_module(self, source, language="python"):
-            assert lease.held == bool(held_during_upload)
-            return super().load_module(source, language)
+    program = Program([Upload("k", "module", source="def main(x): return x")])
+
+    class PlacementRuntime(FakeRuntime):
+        def load_module(self, source):
+            assert lease.held
+            return super().load_module(source)
 
     outcome = execute_for_test(program, PlacementRuntime(), lease)
     assert outcome.status == "COMPLETED"
@@ -601,11 +587,13 @@ def test_handle_destructors_run_before_gpu_lease_is_released():
         def reset(self):
             observed.append(("reset", lease.held))
 
-    program = Program([
-        Upload("module", "module", source="unused"),
-        GetFunction("fn", Ref("module"), "finish", cpu_only=True),
-        Run("done", Ref("fn"), []),
-    ])
+    program = Program(
+        [
+            Upload("module", "module", source="unused"),
+            GetFunction("fn", Ref("module"), "finish", cpu_only=True),
+            Run("done", Ref("fn"), []),
+        ]
+    )
     result = execute_for_test(program, Runtime(), lease)
     assert result.status == "COMPLETED"
     assert observed == [("destroy", True), ("reset", True)]

@@ -39,7 +39,7 @@ MAX_TRACEBACK_BYTES = 8192
 
 
 class Runtime(Protocol):
-    def load_module(self, source: str, language: str = "python") -> Any: ...
+    def load_module(self, source: str) -> Any: ...
     def load_library(self, data: bytes) -> Any: ...
     def get_function(self, module: Any, name: str) -> Any: ...
     def load_tensor(self, data: bytes, dtype: str, shape: list[int]) -> Any: ...
@@ -121,13 +121,11 @@ def _execute_in_workspace(
                             instruction.path,
                             program.blob_bytes[instruction.blob],
                         )
+                        env[instruction.id] = instruction.path
                     elif isinstance(instruction, Upload):
                         if instruction.kind == "module":
                             assert instruction.source is not None
-                            env[instruction.id] = runtime.load_module(
-                                instruction.source,
-                                language=instruction.language,
-                            )
+                            env[instruction.id] = runtime.load_module(instruction.source)
                         elif instruction.kind == "bytes":
                             assert instruction.blob is not None
                             env[instruction.id] = program.blob_bytes[instruction.blob]
@@ -227,7 +225,11 @@ def _execute_in_workspace(
                     # A launch-configuration error can sit in CUDA's last-error slot
                     # without failing synchronize. Consume it here so it belongs to this
                     # request; reading clears it, and the context is still healthy.
-                    if last_error is not None and error is not None and error["kind"] == "gpu_access":
+                    if (
+                        last_error is not None
+                        and error is not None
+                        and error["kind"] == "gpu_access"
+                    ):
                         # The violation is the earlier fault, and the parent reads its fields.
                         error["message"] += f"; CUDA also reports {last_error}"
                     elif last_error is not None:
@@ -339,11 +341,6 @@ def _place(
         return
     if isinstance(instruction, Upload) and instruction.kind == "bytes":
         return
-    if isinstance(instruction, Upload) and instruction.kind == "module":
-        # Binding CUDA source runs nothing, and is far too brief to be worth
-        # dropping the lease over; exec'ing Python could touch the GPU.
-        if instruction.language == "cuda":
-            return
     lease.acquire()
 
 

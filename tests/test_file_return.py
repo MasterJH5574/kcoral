@@ -64,6 +64,65 @@ def write(data):
     }
 
 
+def test_file_registers_bind_normalized_relative_paths(tmp_path):
+    program = Program()
+    first = program.upload_file(blob=b"original\x00\xff", path="./inputs//first")
+    second = program.upload_file(blob=b"original\x00\xff", path="inputs/second")
+    module = program.upload(
+        kind="module",
+        source="""
+import os
+from pathlib import Path
+
+def edit(first, second):
+    assert first == "inputs/first" and second == "inputs/second"
+    assert Path(first).read_bytes() == Path(second).read_bytes()
+    Path(first).write_bytes(b"edited")
+    os.chdir("inputs")
+    return str(Path(first).parent)
+""",
+    )
+    edit = program.get_function(module=module, name="edit", cpu_only=True)
+    directory = program.run(fn=edit, args=[first, second])
+    # File returns remain relative to the original workspace after chdir.
+    program.return_(key="path", value=first)
+    program.return_file(key="first", path=first)
+    program.return_file(key="second", path=second)
+    program.return_folder(key="folder", path=directory)
+    outcome = run(program, tmp_path)
+    assert outcome.status == "COMPLETED", outcome.error
+    assert values(outcome) == {
+        "path": "inputs/first",
+        "first": ReturnedFile(b"edited"),
+        "second": ReturnedFile(b"original\x00\xff"),
+        "folder": ReturnedFolder(
+            {
+                "first": ReturnedFile(b"edited"),
+                "second": ReturnedFile(b"original\x00\xff"),
+            }
+        ),
+    }
+    assert program._blobs == {compute_blob_hash(b"original\x00\xff"): b"original\x00\xff"}
+
+
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_return_rejects_absolute_path_registers_even_inside_workspace(tmp_path, kind):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "data").write_bytes(b"data")
+    path = str(target / "data" if kind == "file" else target)
+    program = Program()
+    module = program.upload(kind="module", source=f"def path(): return {path!r}")
+    fn = program.get_function(module=module, name="path")
+    result = program.run(fn=fn)
+    getattr(program, f"return_{kind}")(key="bad", path=result)
+    outcome = run(program, tmp_path)
+    assert outcome.status == "FAILED"
+    assert outcome.error["kind"] == "serialization"
+    assert "relative" in outcome.error["message"]
+    assert outcome.results == {} and outcome.binary_parts == {}
+
+
 @pytest.mark.parametrize("kind", ["symlink", "fifo"])
 def test_folder_return_rejects_unsafe_entries(tmp_path, kind):
     folder = tmp_path / "out"
