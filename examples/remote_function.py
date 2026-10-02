@@ -10,7 +10,7 @@ from kcoral import Client
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--endpoint", default=os.environ.get("KCORAL_URL", "http://localhost:8000"))
+    parser.add_argument("--endpoint", default=os.environ.get("KCORAL_URL", "http://127.0.0.1:8000"))
     args = parser.parse_args()
 
     with Client(args.endpoint) as client:

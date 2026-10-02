@@ -457,7 +457,7 @@ class Client:
     ) -> None:
         """Create a client without contacting the server.
 
-        :param base_url: Server address, such as ``http://localhost:8000``.
+        :param base_url: Server address, such as ``http://127.0.0.1:8000``.
         :param headers: Optional HTTP headers sent with every request.
         :param connect_timeout_seconds: Limit for establishing a connection.
 

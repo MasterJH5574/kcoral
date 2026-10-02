@@ -51,6 +51,7 @@ html_sidebars = {
 html_title = "KCoral documentation"
 html_favicon = "_static/brand/kcoral-icon.png"
 html_theme_options = {
+    "sidebar_hide_name": True,
     "light_logo": "brand/kcoral-logo-light.png",
     "dark_logo": "brand/kcoral-logo-dark.png",
     "source_repository": "https://github.com/mlc-ai/kcoral/",

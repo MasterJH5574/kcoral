@@ -9,12 +9,6 @@ KCoral executes GPU benchmark programs over HTTP. It can also run as a CPU
 compilation service: upload code and data, call functions, and explicitly return
 the results you need.
 
-> [!WARNING]
-> KCoral allows clients to execute arbitrary code on its workers. Only allow
-> trusted clients to access your KCoral server or Router. Deploy on a trusted,
-> isolated network and never expose these endpoints to the public internet.
-> Run workers in a sandbox with restricted permissions and access to host resources.
-
 **[Documentation](https://kcoral.mlc.ai/docs/)** · [Quickstart](docs/getting-started/quickstart.md) ·
 [Write a client program](docs/client-guide/writing-a-program.md) · [KCoral Protocol](docs/client-guide/protocol.md)
 
@@ -39,7 +33,7 @@ for both GPU execution and CPU compilation dependencies. See
 ## Run remote tools
 
 ```bash
-export KCORAL_URL='http://SERVER_HOST:PORT'
+export KCORAL_URL='http://127.0.0.1:8000'
 kcoral run python --send experiment -- experiment/check.py
 kcoral run compute-sanitizer --send experiment -- python experiment/check.py
 kcoral run ncu --send experiment --out artifacts/ncu \
@@ -50,13 +44,23 @@ kcoral run shell --send experiment -- bash experiment/setup.sh
 ```
 
 Any remote tool also accepts `--host HOST --port PORT`, for example
-`kcoral run python --host localhost --port 8000 --send experiment -- experiment/check.py`.
+`kcoral run python --host 127.0.0.1 --port 8000 --send experiment -- experiment/check.py`.
 These options override `KCORAL_URL`, with a warning showing the address used.
 
 See [Builtin CLI Tools](docs/client-guide/builtin-cli-tools.md) for common options and a
 separate guide to each tool, including dependencies, examples, and returned files.
 
 ## Run the server
+
+> [!WARNING]
+> KCoral allows clients to execute arbitrary code on its workers. Only allow
+> trusted clients to access your KCoral server or Router. Deploy on a trusted,
+> isolated network and never expose these endpoints to the public internet.
+> Run workers in a sandbox with restricted permissions and access to host resources.
+
+The server checks [bubblewrap filesystem isolation](docs/server-guide/launch-the-server.md#isolate-worker-files-with-bubblewrap)
+at startup by default. If unavailable, it warns and runs without isolation.
+Use `--sandbox none` to disable it explicitly.
 
 After installing the worker environment:
 
@@ -96,7 +100,7 @@ With a running GPU server, the first program uploads a tensor, adds one on the
 GPU, returns it and checks the values:
 
 ```bash
-KCORAL_URL=http://localhost:8000 python examples/first_program.py
+KCORAL_URL=http://127.0.0.1:8000 python examples/first_program.py
 ```
 
 See [Your First Program](docs/getting-started/quickstart.md),

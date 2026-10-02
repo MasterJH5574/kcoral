@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -21,8 +22,18 @@ from kcoral.tools import cli
 from kcoral.tools._common import pack_inputs, unpack_inputs
 
 
+def isolated_tool_runtime_factory(python_executable):
+    # The runner searches beside Python before PATH. Keep that directory under
+    # test control so installed profilers cannot shadow the fake executables.
+    sys.executable = str(python_executable)
+    return fake_runtime_factory()
+
+
 @pytest.fixture
 def remote(monkeypatch, tmp_path):
+    python_executable = tmp_path / "python"
+    python_executable.symlink_to(sys.executable)
+    runtime_factory = partial(isolated_tool_runtime_factory, python_executable)
     config = ServerConfig(
         device="cpu",
         sandbox="none",
@@ -30,7 +41,7 @@ def remote(monkeypatch, tmp_path):
         log_console=False,
         disk_cache_dir=tmp_path / "cache",
     )
-    with TestClient(create_app(config, runtime_factory=fake_runtime_factory)) as server:
+    with TestClient(create_app(config, runtime_factory=runtime_factory)) as server:
         client = Client("http://testserver")
         client.close()
         client._http = server
