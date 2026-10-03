@@ -45,10 +45,15 @@ class ReturnedFile:
             raise TypeError("ReturnedFile contents must be bytes")
 
     def read_bytes(self) -> bytes:
+        """Return the captured file contents without writing to disk."""
         return self._data
 
     def save(self, destination: str | os.PathLike[str], *, overwrite: bool = False) -> Path:
-        """Save to an exact path with an existing parent; refuse symlink traversal."""
+        """Save to an exact path with an existing parent; refuse symlink traversal.
+
+        The destination must be new unless ``overwrite=True``, which permits
+        replacing an existing regular file. Return the destination as a ``Path``.
+        """
         with _destination_parent(destination) as (parent_fd, name, destination_path):
             _check_destination(parent_fd, name, overwrite=overwrite)
             staging = f".kcoral-{secrets.token_hex(16)}"
@@ -77,7 +82,10 @@ class ReturnedFolder:
     """A validated tree; paths are relative to the selected root, which is implicit."""
 
     files: Mapping[str, ReturnedFile]
+    """Read-only mapping of relative paths to captured files, including hidden files."""
+
     directories: tuple[str, ...] = ()
+    """Sorted relative directory paths, including empty directories; excludes the root."""
 
     def __post_init__(self) -> None:
         files = dict(self.files)
@@ -89,7 +97,11 @@ class ReturnedFolder:
         object.__setattr__(self, "directories", directories)
 
     def save(self, destination: str | os.PathLike[str]) -> Path:
-        """Create a new folder, visible while writing; remove partial output on failure."""
+        """Create a new folder beneath an existing parent; refuse symlink traversal.
+
+        The destination must not exist. Output is visible while writing and is
+        removed on failure. Return the destination as a ``Path``.
+        """
         with _destination_parent(destination) as (parent_fd, name, destination_path):
             os.mkdir(name, 0o700, dir_fd=parent_fd)
             try:
