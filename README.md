@@ -93,7 +93,7 @@ Follow requests and worker events using the [logging guide](docs/server-guide/lo
 
 ## Python client
 
-For simple tasks, use [`@client.function()`](docs/client-guide/writing-a-program.md#call-remote-functions)
+For simple tasks, use [`@client.function()`](docs/client-guide/remote-functions.md)
 and call `.remote()` to run a Python function on the server.
 
 With a running GPU server, the first program uploads a tensor, adds one on the
