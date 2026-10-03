@@ -16,6 +16,29 @@ pytestmark = pytest.mark.skipif(
     reason="GPU integration test requires KCORAL_GPU_TEST=1",
 )
 
+
+def test_uploaded_tensor_has_independent_storage():
+    import torch
+
+    from kcoral.gpu_runtime import _materialize_tensor
+
+    dtype_name = "float32"
+    dtype = torch.float32
+    source = torch.arange(8, dtype=dtype).reshape(2, 4)
+    raw = source.view(torch.uint8).numpy().tobytes()
+    original = bytes(bytearray(raw))
+    uploaded = _materialize_tensor(raw, dtype_name, [2, 4])
+    assert uploaded.device.type == "cuda"
+    assert uploaded.dtype == dtype
+    assert uploaded.cpu().view(torch.uint8).numpy().tobytes() == original
+    uploaded.view(torch.uint8).zero_()
+    torch.cuda.synchronize()
+    assert raw == original
+    # A cached blob must remain intact after an earlier request mutates its GPU copy.
+    repeated = _materialize_tensor(raw, dtype_name, [2, 4])
+    assert repeated.cpu().view(torch.uint8).numpy().tobytes() == original
+
+
 KERNEL = """from __future__ import annotations
 from tvm.script import tirx as T
 

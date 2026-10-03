@@ -39,3 +39,17 @@ def test_multipart_rejects_duplicate_part_headers():
     )
     with pytest.raises(ValidationError, match="malformed Content-Disposition"):
         parse_multipart("multipart/form-data; boundary=boundary", duplicate_name)
+
+
+def test_binary_payload_preserves_boundary_prefixes():
+    payload = bytes(range(256)) + b"\r\n--boundaryX\r\n--boundary--X\r\n--boundary \tX\n"
+    body = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="blob"\r\n'
+        b"Content-Type: application/octet-stream\r\n\r\n"
+        + payload
+        + b"\r\n--boundary--\r\n"
+    )
+    assert parse_multipart("multipart/form-data; boundary=boundary", body) == [
+        MultipartPart("blob", "application/octet-stream", payload)
+    ]

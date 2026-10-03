@@ -17,6 +17,7 @@ import os
 import tempfile
 import time
 import traceback
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -346,7 +347,15 @@ def _materialize_tensor(data: bytes, dtype_name: str, shape: list[int]) -> Any:
             raise ExecutionError("runtime", f"unknown dtype: {dtype_name!r}")
         if not data:
             return torch.empty(shape, dtype=dtype, device="cuda")
-        return torch.frombuffer(bytearray(data), dtype=dtype).reshape(shape).to("cuda")
+        # The temporary host view is read only and never escapes this function.
+        # CUDA receives independent storage; copying the bytes on CPU first
+        # needlessly extends the GPU lease for large uploads.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="The given buffer is not writable", category=UserWarning
+            )
+            host = torch.frombuffer(data, dtype=dtype).reshape(shape)
+        return host.to("cuda")
     except ExecutionError:
         raise
     except Exception as exc:

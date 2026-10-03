@@ -2,6 +2,7 @@ import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -101,6 +102,31 @@ def test_health():
         "requests_waiting": 0,
     }
     assert data["instance_id"]
+
+
+def test_health_remains_responsive_while_upload_processing_waits(monkeypatch):
+    import kcoral.app as app_module
+
+    original = app_module._parse_execute_request
+    started, release = Event(), Event()
+
+    def slow(*args):
+        started.set()
+        assert release.wait(10), "Test failed to release parser"
+        return original(*args)
+
+    monkeypatch.setattr(app_module, "_parse_execute_request", slow)
+    config = ServerConfig(sandbox="none", workers_per_gpu=1)
+    with make_client(config) as client, ThreadPoolExecutor(max_workers=2) as threads:
+        upload = threads.submit(post_program, client, {"instructions": []})
+        try:
+            assert started.wait(5)
+            health = threads.submit(client.get, "/health")
+            assert health.result(timeout=2).status_code == 200
+            assert not upload.done()
+        finally:
+            release.set()
+        assert upload.result(timeout=10).status_code in (200, 400)
 
 
 def test_instance_id_changes_with_server_lifecycle():

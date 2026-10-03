@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import traceback
 import uuid
 import warnings
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -167,6 +169,11 @@ def create_app(
             versions=app.state.pool.versions(),
             workers=worker_count,
         )
+        # Keep parsing independent of the executor whose threads can wait for
+        # GPU workers. Bound simultaneous large-buffer processing to four tasks.
+        app.state.upload_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="kcoral-upload"
+        )
         tunnel = None
         app.state.tunnel = None
 
@@ -175,7 +182,10 @@ def create_app(
                 if tunnel is not None:
                     await tunnel.close()
             finally:
-                await app.state.pool.shutdown_async()
+                try:
+                    await asyncio.to_thread(app.state.upload_executor.shutdown, wait=True)
+                finally:
+                    await app.state.pool.shutdown_async()
 
         try:
             if config.router_endpoint is not None:
@@ -306,8 +316,17 @@ def create_app(
 
         cache: ByteCache = request.app.state.cache
         try:
-            program, cache_keys, program_bytes = _parse_execute_request(
-                request.headers.get("content-type"), body_bytes, cache, request.app.state.file_cache
+            # Parsing, hashing and cache I/O must not block the HTTP event loop.
+            # Preserve request context for tracing when crossing the thread boundary.
+            context = contextvars.copy_context()
+            program, cache_keys, program_bytes = await asyncio.get_running_loop().run_in_executor(
+                request.app.state.upload_executor,
+                context.run,
+                _parse_execute_request,
+                request.headers.get("content-type"),
+                body_bytes,
+                cache,
+                request.app.state.file_cache,
             )
         except ValidationError as exc:
             finished(
