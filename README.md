@@ -73,7 +73,7 @@ for CPU compilation, GPU selection, worker settings and limits.
 
 ### File upload cache
 
-[File cache configuration](docs/server-guide/launch-the-server.md#file-upload-cache) covers
+[File cache configuration](docs/server-guide/launch-the-server.md#cache) covers
 the persistent cache directory, capacity and disabling caching.
 
 ## Route across nodes
@@ -93,7 +93,7 @@ Follow requests and worker events using the [logging guide](docs/server-guide/lo
 
 ## Python client
 
-For simple tasks, use [`@client.function()`](docs/client-guide/writing-a-program.md#remote-functions)
+For simple tasks, use [`@client.function()`](docs/client-guide/writing-a-program.md#call-remote-functions)
 and call `.remote()` to run a Python function on the server.
 
 With a running GPU server, the first program uploads a tensor, adds one on the
@@ -109,7 +109,7 @@ See [Your First Program](docs/getting-started/quickstart.md),
 
 Use `Program.return_file()` or `return_folder()` to receive workspace outputs,
 then call `.save(destination)` on the result. See
-[returning files and folders](docs/client-guide/writing-a-program.md#returning-files-and-folders).
+[returning files and folders](docs/client-guide/writing-a-program.md#return-files-and-folders).
 
 ## Protocol summary
 

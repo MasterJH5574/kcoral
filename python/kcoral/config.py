@@ -21,8 +21,10 @@ class ServerConfig:
     signature. GPU device identifiers are physical device numbers. CPU mode
     uses ``num_workers`` instead of ``workers_per_gpu`` and ignores ``gpus``.
 
-    ``log_dir=None`` disables logging for applications created directly in
-    Python. The command-line interface instead defaults its log directory to
+    ``log_dir=None`` disables log files and saved programs for applications
+    created directly in Python. Console events remain enabled by default;
+    set ``log_console=False`` to disable them too.
+    The command-line interface instead defaults its log directory to
     ``logs``. The file-cache path defaults to an absolute ``XDG_CACHE_HOME``
     followed by ``kcoral/files``, or ``~/.cache/kcoral/files`` otherwise.
     Set ``disk_cache_dir=None`` or ``disk_cache_capacity_mbytes=0`` to disable it.
@@ -31,7 +33,7 @@ class ServerConfig:
     """
 
     gpus: list[int] = field(default_factory=lambda: [0])
-    log_dir: Path | None = None  # structured event logs; None disables logging
+    log_dir: Path | None = None  # structured event logs; None disables file logging
     log_console: bool = True  # mirror events to stderr as well as the log file
     log_programs: bool = True  # keep each request's program JSON beside the log
     cache_capacity_bytes: int = 16 * 1024**3  # 16 GB byte cache

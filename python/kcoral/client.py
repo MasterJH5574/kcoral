@@ -81,6 +81,7 @@ class Register:
     """
 
     id: str
+    """The unique identifier of the instruction that produced this value."""
 
 
 @dataclass
@@ -90,8 +91,8 @@ class Program:
     Construction does not contact a server or compile a kernel. Uploads
     snapshot local input, and :meth:`Client.execute` sends the instructions
     and required binary data. Each instruction identifier and return key must
-    be unique within this program. Only values selected by :meth:`return_`
-    appear in the response.
+    be unique within this program. Only outputs selected by :meth:`return_`,
+    :meth:`return_file` or :meth:`return_folder` appear in the response.
 
     Each value-producing instruction automatically receives an ID such as
     ``upload_0``, ``get_function_1``, or ``run_2``. Use the optional ``id`` field

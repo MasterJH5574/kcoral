@@ -70,7 +70,8 @@ def create_app(
         primarily for custom integration and testing. By default the selected
         CPU or GPU mode determines the runtime.
     :returns: An application to run with an HTTP server such as uvicorn.
-    :raises ValueError: If the device mode or disk cache capacity is invalid.
+    :raises ValueError: If the device mode, disk cache capacity or sandbox
+        configuration is invalid.
 
     Worker processes start during the application's serving lifecycle, not
     when this function is imported. Install the ``server`` extra to use it.
