@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -162,6 +163,24 @@ def test_multi_gpu_mounts_include_only_the_assigned_device_minors(monkeypatch):
         assert nodes & devices == {"/dev/nvidia4", "/dev/nvidia6"}
     finally:
         instance.close()
+
+
+@pytest.mark.parametrize("temporary_root", ["/tmp", "/var/tmp"])
+def test_runtime_mount_in_temporary_directory(require_bubblewrap, temporary_root):
+    with tempfile.TemporaryDirectory(dir=temporary_root, prefix="kcoral-runtime-") as directory:
+        data = Path(directory) / "data.bin"
+        data.write_text("runtime data")
+        instance = Sandbox(readonly_paths=(data,))
+        try:
+            result = subprocess.run(
+                instance.command(None, program=("/bin/cat", str(data))),
+                capture_output=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout == b"runtime data"
+        finally:
+            instance.close()
 
 
 def test_explicit_gpu_set_preserves_filesystem_isolation(require_bubblewrap, tmp_path):
@@ -590,6 +609,26 @@ def main(leave_thread):
     assert result.retire_reason == "sandbox_cleanup"
     assert not worker._proc.is_alive()
     assert not root.exists()
+
+
+def test_joined_spawn_helper_does_not_fail_request(worker):
+    value, reason = run(
+        worker,
+        parsed("""
+def main():
+    import multiprocessing as mp
+    process = mp.get_context("spawn").Process(target=int)
+    process.start()
+    process.join()
+    exitcode = process.exitcode
+    process.close()
+    return exitcode
+"""),
+    )
+    assert value == 0
+    # The helper retires the sandbox without failing the completed request.
+    assert reason == "sandbox_cleanup"
+    assert not worker._proc.is_alive()
 
 
 @pytest.mark.parametrize("status", ["COMPLETED", "FAILED"])
