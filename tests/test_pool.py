@@ -5,12 +5,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from support.programs import harness_call
+from support.runtime import fake_runtime_factory
 
-from kcoral.lease import GPULeases, GPUUnavailable
-from kcoral.pool import PoolBusy, WorkerPool
+from kcoral.runtime.lease import GPULeases, GPUUnavailable
+from kcoral.runtime.pool import PoolBusy, WorkerPool
+from kcoral.runtime.worker import (
+    Worker,
+    WorkerCleanupError,
+    WorkerCrashed,
+    WorkerTimeout,
+    worker_main,
+)
 from kcoral.schemas import GetFunction, Program, Ref, Return, Run, Upload
-from kcoral.testing import fake_runtime_factory
-from kcoral.worker import Worker, WorkerCleanupError, WorkerCrashed, WorkerTimeout, worker_main
 
 
 def prog(*instrs):
@@ -228,7 +234,7 @@ def test_worker_prepares_before_parent_grants_gpu_initialization(monkeypatch):
             return initialize
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "before-test")
-    monkeypatch.setattr("kcoral.worker.os.setsid", lambda: None)
+    monkeypatch.setattr("kcoral.runtime.worker.os.setsid", lambda: None)
     worker_main("GPU-abc123", Connection(), Factory(), max_requests=0)
 
     # The parent picks the card; what the server was launched with is gone.
@@ -263,7 +269,7 @@ def test_cpu_worker_does_not_change_visible_devices(monkeypatch):
             return next(self.incoming)
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "unchanged")
-    monkeypatch.setattr("kcoral.worker.os.setsid", lambda: None)
+    monkeypatch.setattr("kcoral.runtime.worker.os.setsid", lambda: None)
     worker_main(None, Connection(), fake_runtime_factory, max_requests=0)
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "unchanged"

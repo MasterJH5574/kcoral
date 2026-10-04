@@ -9,8 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kcoral import Client
-from kcoral.app import create_app
 from kcoral.config import ServerConfig
+from kcoral.server.app import create_app
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("KCORAL_MULTI_GPU_TEST") != "1",

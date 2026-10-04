@@ -11,15 +11,15 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from support.runtime import fake_runtime_factory
 
 from kcoral import Program
-from kcoral.app import create_app
 from kcoral.config import ServerConfig
-from kcoral.lease import GPULeases, GPUUnavailable, NoopLeases
-from kcoral.pool import PoolBusy, WorkerPool
-from kcoral.schemas import parse_program
-from kcoral.testing import fake_runtime_factory
-from kcoral.worker import Worker, WorkerCleanupError, WorkerCrashed, WorkerTimeout
+from kcoral.protocol import parse_program
+from kcoral.runtime.lease import GPULeases, GPUUnavailable, NoopLeases
+from kcoral.runtime.pool import PoolBusy, WorkerPool
+from kcoral.runtime.worker import Worker, WorkerCleanupError, WorkerCrashed, WorkerTimeout
+from kcoral.server.app import create_app
 
 
 def wait_for(predicate, timeout=10):
@@ -46,7 +46,7 @@ def build(source, args=(), *, count=2):
 
 @pytest.fixture
 def pool(monkeypatch):
-    monkeypatch.setattr("kcoral.worker.nvml.device_uuid", lambda _: None)
+    monkeypatch.setattr("kcoral.runtime.worker.nvml.device_uuid", lambda _: None)
     with_pool = WorkerPool(
         [0, 2, 4, 6],
         fake_runtime_factory,
@@ -183,13 +183,19 @@ def test_interpreter_finalizers_use_the_execution_deadline(
 
         if not shutil.which("bwrap"):
             pytest.skip("bubblewrap is not installed")
-    monkeypatch.setattr("kcoral.worker.nvml.device_uuid", lambda _: None)
-    worker = Worker(gpus, fake_runtime_factory, sandbox=sandbox, termination_grace_seconds=0.1)
+    monkeypatch.setattr("kcoral.runtime.worker.nvml.device_uuid", lambda _: None)
+    worker = Worker(
+        gpus,
+        fake_runtime_factory,
+        sandbox=sandbox,
+        sandbox_readonly_paths=(Path(__file__).parent,),
+        termination_grace_seconds=0.1,
+    )
     leases = NoopLeases() if gpus is None else GPULeases(list(gpus))
     marker = tmp_path / "interpreter-exited"
     observed = []
     if worker._sandbox is not None:
-        from kcoral import sandbox as sandboxing
+        from kcoral.support import sandbox as sandboxing
 
         marker = Path(sandboxing.WORKSPACE) / "interpreter-exited"
         sandbox_instance = worker._sandbox
@@ -338,7 +344,11 @@ def test_invalid_gpu_count_is_rejected(count):
 
 
 def test_server_rejects_impossible_gpu_count_and_cpu_jobs():
-    for config in (ServerConfig(gpus=[0], workers_per_gpu=1), ServerConfig(device="cpu")):
+    readonly = (Path(__file__).parent,)
+    for config in (
+        ServerConfig(gpus=[0], workers_per_gpu=1, sandbox_readonly_paths=readonly),
+        ServerConfig(device="cpu", sandbox_readonly_paths=readonly),
+    ):
         with TestClient(create_app(config, runtime_factory=fake_runtime_factory)) as client:
             body = {
                 "instructions": [{"op": "upload", "id": "m", "kind": "module", "source": "pass"}],
@@ -395,13 +405,13 @@ def cpu_phase(marker, resume):
 
 
 def test_unverified_cleanup_quarantines_the_allocation(pool, monkeypatch):
-    from kcoral.lease import GPUUnavailable
-    from kcoral.worker import WorkerCleanupError
+    from kcoral.runtime.lease import GPUUnavailable
+    from kcoral.runtime.worker import WorkerCleanupError
 
     def lost_supervisor(*args, **kwargs):
         raise WorkerCleanupError("supervisor disappeared")
 
-    monkeypatch.setattr("kcoral.worker.Worker.run", lost_supervisor)
+    monkeypatch.setattr("kcoral.runtime.worker.Worker.run", lost_supervisor)
     with pytest.raises(WorkerCleanupError):
         pool.submit(build("def main(): return 1"), 5)
     with pytest.raises(GPUUnavailable):
@@ -604,7 +614,7 @@ class DelayedJobFactory:
 def test_job_startup_timeout_and_crash_have_distinct_http_statuses(
     tmp_path, monkeypatch, phase, crash
 ):
-    monkeypatch.setattr("kcoral.worker.nvml.device_uuid", lambda _: None)
+    monkeypatch.setattr("kcoral.runtime.worker.nvml.device_uuid", lambda _: None)
     marker = tmp_path / "startup.pid"
     config = ServerConfig(gpus=[0, 2], workers_per_gpu=1, sandbox="none")
     app = create_app(config, runtime_factory=DelayedJobFactory(phase, str(marker), crash))

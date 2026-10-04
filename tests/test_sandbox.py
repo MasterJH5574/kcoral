@@ -13,15 +13,15 @@ from types import SimpleNamespace
 import pytest
 
 from kcoral import Program
-from kcoral import sandbox as sandboxing
-from kcoral.client import _decode_value
-from kcoral.cpu_runtime import cpu_runtime_factory
-from kcoral.events import EventLogger
-from kcoral.lease import NoopLeases
-from kcoral.pool import WorkerPool
-from kcoral.sandbox import Sandbox
-from kcoral.schemas import parse_program
-from kcoral.worker import Worker, WorkerCrashed, WorkerResult, WorkerTimeout
+from kcoral.client.result import _decode_value
+from kcoral.protocol import parse_program
+from kcoral.runtime.lease import NoopLeases
+from kcoral.runtime.pool import WorkerPool
+from kcoral.runtime.python import cpu_runtime_factory
+from kcoral.runtime.worker import Worker, WorkerCrashed, WorkerResult, WorkerTimeout
+from kcoral.server.events import EventLogger
+from kcoral.support import sandbox as sandboxing
+from kcoral.support.sandbox import Sandbox
 
 
 @pytest.fixture
@@ -165,7 +165,7 @@ def test_multi_gpu_mounts_include_only_the_assigned_device_minors(monkeypatch):
 
 
 def test_explicit_gpu_set_preserves_filesystem_isolation(require_bubblewrap, tmp_path):
-    from kcoral.testing import fake_runtime_factory
+    from support.runtime import fake_runtime_factory
 
     hidden = tmp_path / "host-secret"
     hidden.write_text("private")
@@ -175,7 +175,7 @@ def test_explicit_gpu_set_preserves_filesystem_isolation(require_bubblewrap, tmp
     pool = WorkerPool(
         [0, 2],
         fake_runtime_factory,
-        sandbox_readonly_paths=(allowed,),
+        sandbox_readonly_paths=(allowed, Path(__file__).parent),
         max_requests_per_worker=0,
     )
     try:
@@ -183,7 +183,7 @@ def test_explicit_gpu_set_preserves_filesystem_isolation(require_bubblewrap, tmp
             """
 def main(hidden, allowed):
     from pathlib import Path
-    from kcoral import sandbox
+    from kcoral.support import sandbox
     return [sandbox.active(), Path(hidden).exists(), Path(allowed, "data").read_text()]
 """,
             args=[str(hidden), str(allowed)],
@@ -202,7 +202,7 @@ def test_server_startup_disables_unavailable_sandbox_and_warns(monkeypatch, tmp_
     from fastapi.testclient import TestClient
 
     from kcoral import ServerConfig
-    from kcoral.app import create_app
+    from kcoral.server.app import create_app
 
     if failure == "missing":
         monkeypatch.setattr(shutil, "which", lambda name: None)
@@ -267,7 +267,7 @@ def test_explicitly_disabled_sandbox_skips_startup_probe(monkeypatch):
     from fastapi.testclient import TestClient
 
     from kcoral import ServerConfig
-    from kcoral.app import create_app
+    from kcoral.server.app import create_app
 
     monkeypatch.setattr(sandboxing, "probe", lambda *args: pytest.fail("unexpected probe"))
     app = create_app(ServerConfig(device="cpu", sandbox="none", disk_cache_capacity_mbytes=0))
@@ -282,7 +282,7 @@ def test_server_rechecks_bubblewrap_on_next_start(require_bubblewrap, monkeypatc
     from fastapi.testclient import TestClient
 
     from kcoral import ServerConfig
-    from kcoral.app import create_app
+    from kcoral.server.app import create_app
 
     config = ServerConfig(device="cpu", log_console=False, disk_cache_capacity_mbytes=0)
     app = create_app(config)
@@ -301,7 +301,7 @@ def test_successful_probe_does_not_hide_worker_runtime_failures(monkeypatch):
     from fastapi.testclient import TestClient
 
     from kcoral import ServerConfig
-    from kcoral import app as app_module
+    from kcoral.server import app as app_module
 
     monkeypatch.setattr(sandboxing, "probe", lambda *args: None)
 
@@ -319,7 +319,7 @@ def test_successful_probe_does_not_hide_worker_runtime_failures(monkeypatch):
 
 
 def test_partial_pool_startup_closes_already_created_sandboxes(require_bubblewrap, monkeypatch):
-    import kcoral.pool
+    import kcoral.runtime.pool
 
     created = []
     roots = []
@@ -332,7 +332,7 @@ def test_partial_pool_startup_closes_already_created_sandboxes(require_bubblewra
         roots.append(instance._sandbox.root)
         return instance
 
-    monkeypatch.setattr(kcoral.pool, "Worker", factory)
+    monkeypatch.setattr(kcoral.runtime.pool, "Worker", factory)
     with pytest.raises(RuntimeError, match="second worker failed"):
         WorkerPool([], cpu_runtime_factory, cpu_workers=2, sandbox="bubblewrap")
     assert not created[0]._proc.is_alive() and not roots[0].exists()
@@ -732,7 +732,7 @@ def test_http_uploads_and_logging_use_isolated_reused_worker(
     from fastapi.testclient import TestClient
 
     from kcoral import ServerConfig
-    from kcoral.app import create_app
+    from kcoral.server.app import create_app
 
     calls = []
     original_probe = sandboxing.probe
@@ -805,7 +805,7 @@ def main(cache):
 def gpu_sandbox(require_bubblewrap, tmp_path):
     if os.environ.get("KCORAL_GPU_TEST") != "1":
         pytest.skip("requires KCORAL_GPU_TEST=1 and an externally locked idle GPU")
-    from kcoral.gpu_runtime import gpu_runtime_factory
+    from kcoral.runtime.gpu import gpu_runtime_factory
 
     gpu_id = int(os.environ.get("KCORAL_SANDBOX_GPU", "0"))
     readonly = tuple(
@@ -822,7 +822,7 @@ def gpu_sandbox(require_bubblewrap, tmp_path):
         termination_grace_seconds=0.1,
         events=events,
     )
-    from kcoral.lease import GPULeases
+    from kcoral.runtime.lease import GPULeases
 
     try:
         yield instance, GPULeases([gpu_id]), readonly

@@ -13,12 +13,8 @@ The parent handles timeout and crash recovery when no answer arrives.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import multiprocessing as mp
 import os
-import platform
-import signal
 import sys
 import tempfile
 import threading
@@ -28,11 +24,18 @@ from dataclasses import dataclass
 from multiprocessing.connection import wait
 from pathlib import Path
 
-from . import nvml
-from . import sandbox as sandboxing
-from .engine import execute, read_captured_output
-from .events import EventLogger
-from .lease import GPULeases, GPUUnavailable, LeaseClient, NoopLease, NoopLeases
+from kcoral.runtime.engine import execute, read_captured_output
+from kcoral.runtime.lease import GPULeases, GPUUnavailable, LeaseClient, NoopLease, NoopLeases
+from kcoral.server.events import EventLogger
+from kcoral.support import cuda as nvml
+from kcoral.support import sandbox as sandboxing
+from kcoral.support.platform import (
+    _children,
+    _drain_children,
+    _enable_child_subreaper,
+    _terminate_process_tree,
+    _wait_for_tree_exit,
+)
 
 _WORKER_PIPE_FAILURES = (EOFError, ConnectionResetError, BrokenPipeError, OSError)
 
@@ -802,156 +805,12 @@ class Worker:
         self._kill()
 
 
-def _terminate_process_tree(process, grace_seconds: float) -> None:
-    """Terminate the worker and everything the submitted code spawned.
-
-    The worker leads a process group (see :func:`worker_main`), so a killpg
-    covers grandchildren a plain ``Process.kill()`` would orphan. SIGTERM first,
-    ``grace_seconds`` for a clean exit, then SIGKILL the survivors.
-    """
-    if process.pid is None:
-        return
-    signaled_group = _signal_process_group(process.pid, signal.SIGTERM)
-    if not signaled_group:
-        process.terminate()
-    process.join(timeout=grace_seconds)
-    if signaled_group:
-        _signal_process_group(process.pid, signal.SIGKILL)
-    if process.is_alive():
-        process.kill()
-    process.join(timeout=5)
-
-
-def _signal_process_group(process_group_id: int, sig: signal.Signals) -> bool:
-    """Signal a process group; False when unsupported or the group is gone."""
-    if not hasattr(os, "killpg"):
-        return False
-    try:
-        os.killpg(process_group_id, sig)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # the group exists but a member is not signalable
-
-
-def _children(pid: int) -> set[int]:
-    """Read every thread: native libraries can launch children off the main thread."""
-    children: set[int] = set()
-    for task in Path(f"/proc/{pid}/task").glob("*"):
-        try:
-            children.update(map(int, (task / "children").read_text().split()))
-        except (FileNotFoundError, ProcessLookupError):
-            pass
-    return children
-
-
-def _descendants(pid: int) -> set[int]:
-    found: set[int] = set()
-    pending = [pid]
-    while pending:
-        for child in _children(pending.pop()) - found:
-            found.add(child)
-            pending.append(child)
-    return found
-
-
-def _pidfd_open(pid: int) -> int:
-    native = getattr(os, "pidfd_open", None)
-    if native is not None:
-        return native(pid)
-    # Linux x86-64 and AArch64 share these syscall numbers. This fallback also
-    # works when Python or libc was built against headers predating pidfds.
-    if platform.machine() not in ("x86_64", "aarch64"):
-        raise RuntimeError("this platform needs Python with pidfd support")
-    libc = ctypes.CDLL(None, use_errno=True)
-    fd = libc.syscall(434, pid, 0)  # pidfd_open
-    if fd < 0:
-        raise OSError(ctypes.get_errno(), "pidfd_open failed")
-    return fd
-
-
-def _pidfd_signal(fd: int, sig: int) -> None:
-    native = getattr(signal, "pidfd_send_signal", None)
-    if native is not None:
-        native(fd, sig)
-        return
-    if platform.machine() not in ("x86_64", "aarch64"):
-        raise RuntimeError("this platform needs Python with pidfd support")
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.syscall(424, fd, sig, None, 0) != 0:  # pidfd_send_signal
-        raise OSError(ctypes.get_errno(), "pidfd_send_signal failed")
-
-
-def _signal(pid: int, sig: int) -> None:
-    try:
-        fd = _pidfd_open(pid)
-        try:
-            # Pin the identity before checking ancestry, so PID reuse cannot
-            # direct a cleanup signal at another request's process.
-            if pid in _descendants(os.getpid()):
-                _pidfd_signal(fd, sig)
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        if exc.errno != errno.ESRCH:
-            raise
-
-
-def _reap() -> None:
-    while True:
-        try:
-            if os.waitpid(-1, os.WNOHANG)[0] == 0:
-                return
-        except ChildProcessError:
-            return
-
-
-def _drain_children(runner, grace: float) -> bool:
-    """Terminate all descendants and reap them; never acknowledge a live tree."""
-    had_children = bool(_descendants(os.getpid()) - {runner.pid})
-    deadline = time.monotonic() + grace
-    signaled: set[int] = set()
-    while True:
-        # multiprocessing owns waitpid for the immediate interpreter.
-        runner.join(timeout=0)
-        if runner.exitcode is not None:
-            _reap()
-        children = _descendants(os.getpid())
-        if not children:
-            runner.join(timeout=0)
-            return had_children
-        for pid in children:
-            if time.monotonic() >= deadline:
-                _signal(pid, signal.SIGKILL)
-            elif pid not in signaled:
-                _signal(pid, signal.SIGTERM)
-                signaled.add(pid)
-        # An uninterruptible process must keep its GPU reservation. Do not
-        # acknowledge cleanup until the complete tree has exited.
-        time.sleep(0.02)
-
-
-def _wait_for_tree_exit(runner, grace: float) -> None:
-    """Allow normal teardown, including adopted multiprocessing helpers."""
-    deadline = time.monotonic() + grace
-    while True:
-        runner.join(timeout=0)
-        if runner.exitcode is not None:
-            _reap()
-            if not _descendants(os.getpid()):
-                return
-        if time.monotonic() >= deadline:
-            return
-        time.sleep(0.02)
-
-
 def _supervise_worker(control, conn, device, factory, max_requests, capture_dir, grace):
     """Own one worker and reap its descendants before acknowledging termination."""
     if hasattr(os, "setsid"):
         os.setsid()
     linux = sys.platform == "linux"
-    if linux and ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    if linux and not _enable_child_subreaper():
         control.send({"error": "cannot supervise worker descendants"})
         return
     inspection, child_inspection = mp.get_context("spawn").Pipe()
@@ -1020,7 +879,7 @@ def _supervise_worker(control, conn, device, factory, max_requests, capture_dir,
 
 
 def _sandbox_main() -> None:
-    """Private entry point for ``python -m kcoral.worker`` inside bubblewrap."""
+    """Private entry point for ``python -m kcoral.runtime.worker`` inside bubblewrap."""
     from multiprocessing.connection import Connection
 
     conn = Connection(os.dup(0))

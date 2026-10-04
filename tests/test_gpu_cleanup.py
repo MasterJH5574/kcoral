@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kcoral import gpu_runtime
+from kcoral.runtime import gpu as gpu_runtime
 
 
 @pytest.mark.parametrize("guard_used", [False, True])

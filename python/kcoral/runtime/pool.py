@@ -11,7 +11,7 @@ HTTP 503).
 
 More workers than GPUs is the point: while one compiles, another can measure on
 the GPU it is not using. They take turns through a per-GPU lease, so no two ever
-run on one GPU at once - see :mod:`kcoral.lease`.
+run on one GPU at once - see :mod:`kcoral.runtime.lease`.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from .events import EventLogger
-from .lease import GPULeases, GPUUnavailable, NoopLeases, Ticket
-from .worker import (
+from kcoral.runtime.lease import GPULeases, GPUUnavailable, NoopLeases, Ticket
+from kcoral.runtime.worker import (
     Worker,
     WorkerCleanupError,
     WorkerCrashed,
     WorkerTimeout,
 )
+from kcoral.server.events import EventLogger
 
 
 class IdleWorkers:
