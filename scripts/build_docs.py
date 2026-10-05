@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build latest and stable release tags into a complete static documentation site.
+"""Build the project homepage and versioned documentation into a static website.
 
 Requires Python 3.12 and uv. Each ref gets its own non-editable package install
 so autodoc reads that version's API, not the API installed for another ref.
@@ -109,7 +109,9 @@ def main():
                 if name != "latest":
                     run("git", "worktree", "remove", "--force", source, cwd=REPO)
 
-        redirect(site / "index.html", "docs/")
+        shutil.copyfile(REPO / "website" / "index.html", site / "index.html")
+        shutil.copytree(REPO / "website" / "assets", site / "assets")
+        shutil.copytree(REPO / "docs" / "_static" / "brand", site / "assets" / "brand")
         redirect(site / "docs" / "index.html", "latest/")
         (site / ".nojekyll").touch()
         (site / MARKER).touch()

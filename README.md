@@ -9,7 +9,7 @@ KCoral executes GPU benchmark programs over HTTP. It can also run as a CPU
 compilation service: upload code and data, call functions, and explicitly return
 the results you need.
 
-**[Documentation](https://kcoral.mlc.ai/docs/)** · [Quickstart](docs/getting-started/quickstart.md) ·
+**[Website](https://kcoral.mlc.ai/)** · **[Documentation](https://kcoral.mlc.ai/docs/)** · [Quickstart](docs/getting-started/quickstart.md) ·
 [Write a client program](docs/client-guide/writing-a-program.md) · [KCoral Protocol](docs/client-guide/protocol.md)
 
 ## Install
