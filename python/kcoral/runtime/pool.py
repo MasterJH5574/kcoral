@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from kcoral.runtime.lease import GPULeases, GPUUnavailable, NoopLeases, Ticket
+from kcoral.runtime.lease import GPULeases, GPUUnavailable, LeasePolicy, NoopLeases, Ticket
 from kcoral.runtime.worker import (
     Worker,
     WorkerCleanupError,
@@ -142,6 +142,7 @@ class WorkerPool:
         events: EventLogger | None = None,
         sandbox: str = "bubblewrap",
         sandbox_readonly_paths: tuple[Path, ...] = (),
+        lease_policy: LeasePolicy = "fifo",
     ) -> None:
         if max_requests_per_worker < 0:
             raise ValueError("max_requests_per_worker must be non-negative")
@@ -192,7 +193,9 @@ class WorkerPool:
             raise
         self._gpus = list(dict.fromkeys(gpus))
         self._idle = IdleWorkers(self._workers)
-        self._leases = NoopLeases() if cpu_workers is not None else GPULeases(self._gpus)
+        self._leases = (
+            NoopLeases() if cpu_workers is not None else GPULeases(self._gpus, lease_policy)
+        )
         self._replacing: dict[threading.Thread, Worker] = {}
         self._replacing_lock = threading.Lock()  # so shutdown can copy it mid-flight
         self._require_one_target()
@@ -203,6 +206,7 @@ class WorkerPool:
         timeout: float,
         worker_wait_timeout: float = 0.0,
         request_id: str | None = None,
+        client: str | None = None,
     ) -> SubmitOutcome:
         gpu_count = program.options.get("gpu_count")
         if gpu_count is not None and not 1 <= gpu_count <= min(8, len(self._gpus)):
@@ -227,6 +231,7 @@ class WorkerPool:
         gpu_ids = ()
         initial_wait_ms = initial_held_ms = 0.0
         worker.request_id = request_id
+        worker.client = client
         try:
             if gpu_count is not None:
                 allocation = self._leases.acquire_count(gpu_count, slot, cancelled=self._closing)
@@ -254,6 +259,7 @@ class WorkerPool:
                             worker.begin_shutdown()
                     worker._spawn(timeout=timeout)
                     worker.request_id = request_id
+                    worker.client = client
                 except WorkerCleanupError:
                     self._leases.quarantine(gpu_ids)
                     raise
@@ -318,6 +324,7 @@ class WorkerPool:
             finally:
                 self._leases.abandon(worker._lease_key, worker)
                 worker.request_id = slot.request_id = None
+                worker.client = slot.client = None
                 try:
                     if worker is slot:
                         self._release_or_replace(slot, retire_reason)

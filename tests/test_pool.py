@@ -594,11 +594,11 @@ class _LeaseRecorder:
     def initialization(self, gpu_id):
         return self._inner.initialization(gpu_id)
 
-    def acquire(self, gpu_id, holder):
+    def acquire(self, gpu_id, holder, *, maintenance=False):
         # Reacquiring ownership does not start a new lease interval.
         with self._inner._lock:
             already_owned = self._inner._holder[gpu_id] is holder
-        waited = self._inner.acquire(gpu_id, holder)
+        waited = self._inner.acquire(gpu_id, holder, maintenance=maintenance)
         if not already_owned:
             with self._lock:
                 self.log.append("grant")
@@ -714,7 +714,7 @@ def test_parent_waits_for_retiring_process_exit_before_releasing_gpu(tmp_path):
     class Leases:
         held = False
 
-        def acquire(self, gpu_id, holder):
+        def acquire(self, gpu_id, holder, *, maintenance=False):
             self.held = True
             return 0.0
 
